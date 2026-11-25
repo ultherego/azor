@@ -22,6 +22,7 @@ type check struct {
 	state func() (string, bool)
 	// problem turns the current value into a short note, or nothing.
 	problem func(n float64, s string) string
+	settle  bool // meaningless just after boot; rechecked while it is a problem
 	slow    bool // started programs or directory walks: every ten minutes only
 }
 
@@ -164,7 +165,7 @@ func (h *health) list() []check {
 			return ""
 		}},
 		{name: "package_lists_age", state: h.syncAge, slow: true},
-		{name: "clock_sync", slow: true, state: func() (string, bool) { return command("timedatectl", "show", "-p", "NTPSynchronized", "--value") },
+		{name: "clock_sync", slow: true, settle: true, state: func() (string, bool) { return command("timedatectl", "show", "-p", "NTPSynchronized", "--value") },
 			problem: func(_ float64, s string) string {
 				if s == "no" {
 					return "clock not synchronized"
@@ -291,6 +292,15 @@ func (h *health) bootTime() (string, bool) {
 	return strings.TrimSpace(line[i+2:]), true
 }
 
+func (h *health) uptime() float64 {
+	f := strings.Fields(readStr(h.root + "/proc/uptime"))
+	if len(f) == 0 {
+		return 1e9
+	}
+	v, _ := strconv.ParseFloat(f[0], 64)
+	return v
+}
+
 // run evaluates the detected checks and returns events and current problems.
 func (h *health) run(now time.Time) (events []Record, problems []string) {
 	slow := now.Sub(h.slowAt) >= 10*time.Minute
@@ -303,7 +313,10 @@ func (h *health) run(now time.Time) (events []Record, problems []string) {
 		}
 		n, seenN := h.last[c.name]
 		s, seenS := h.states[c.name]
-		if !c.slow || slow {
+		if c.settle && h.uptime() < 300 {
+			continue
+		}
+		if !c.slow || slow || (c.settle && (!seenS || c.problem(n, s) != "")) {
 			if c.count != nil {
 				if v, ok := c.count(); ok {
 					if seenN && v > n {
@@ -411,7 +424,11 @@ func cmdHealth(w io.Writer) error {
 	_, problems := h.run(time.Now())
 	for _, c := range h.checks {
 		if h.found[c.name] {
-			fmt.Fprintf(w, "  %-20s %s\n", c.name, clean(h.current[c.name]))
+			v := h.current[c.name]
+			if v == "" && c.settle {
+				v = "checked 5 minutes after boot"
+			}
+			fmt.Fprintf(w, "  %-20s %s\n", c.name, clean(v))
 		}
 	}
 	var no []string

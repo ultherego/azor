@@ -521,6 +521,7 @@ func owners(db string, names map[string]bool) map[string]string {
 		if err != nil {
 			continue
 		}
+		fadvise(f, 1) // random: no read-ahead of parts that are not needed
 		r.Reset(f)
 		for {
 			line, err := r.ReadSlice('\n')
@@ -532,16 +533,23 @@ func owners(db string, names map[string]bool) map[string]string {
 						out[n] = strings.Join(p[len(p)-2:], "-")
 					}
 				}
-			} else if string(line) == "%BACKUP%\n" {
-				break
+			} else if string(line) == "%BACKUP%\n" || (len(line) > 4 && line[0] != '%' && string(line) > "usr/bin0") {
+				break // lists are sorted, so nothing of interest follows
 			}
 			if err == io.EOF || (err != nil && err != bufio.ErrBufferFull) {
 				break
 			}
 		}
+		fadvise(f, 4) // do not keep it in memory
 		f.Close()
 	}
 	return out
+}
+
+func fadvise(f *os.File, advice uintptr) {
+	if strconv.IntSize == 64 { // the arguments differ on 32-bit systems
+		syscall.Syscall6(syscall.SYS_FADVISE64, f.Fd(), 0, 0, advice, 0, 0)
+	}
 }
 
 func cmdDesktop(w io.Writer) error {

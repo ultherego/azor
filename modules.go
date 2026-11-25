@@ -152,7 +152,7 @@ func (s *sensors) readBattery(m map[string]float64) {
 
 // factsVersion changes when the set of facts changes, so that an Azor upgrade
 // does not look like a change of the computer.
-const factsVersion = "7"
+const factsVersion = "8"
 
 // facts are settings and states; a change becomes an event.
 func (s *sensors) facts() map[string]string {

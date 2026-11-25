@@ -173,6 +173,25 @@ func watchedUnits(names []string) map[string]string {
 	return out
 }
 
+// stableName describes a partition by the model of its disk, because the
+// kernel may number disks differently at every boot.
+func (s *sensors) stableName(dev string) string {
+	for _, d := range s.glob("/sys/block/*/" + dev) {
+		disk := filepath.Base(filepath.Dir(d))
+		model := readStr(filepath.Dir(d) + "/device/model")
+		same := 0
+		for _, m := range s.glob("/sys/block/*/device/model") {
+			if readStr(m) == model {
+				same++
+			}
+		}
+		if model != "" && same == 1 {
+			return clean(model) + " part " + strings.TrimPrefix(strings.TrimPrefix(dev, disk), "p")
+		}
+	}
+	return dev
+}
+
 // fsFacts reports error counters of filesystems and degraded arrays. The
 // counters never reset by themselves, so only a change is of interest.
 func (s *sensors) fsFacts(put func(k, v string)) {
@@ -182,9 +201,9 @@ func (s *sensors) fsFacts(put func(k, v string)) {
 		devs, _ := filepath.Glob(fs + "/devices/*")
 		name := "device " + id
 		if len(devs) == 1 {
-			name = filepath.Base(devs[0])
+			name = s.stableName(filepath.Base(devs[0]))
 		} else if len(devs) > 0 {
-			name = filepath.Base(devs[0]) + " device " + id
+			name = s.stableName(filepath.Base(devs[0])) + " device " + id
 		}
 		var bad []string
 		for _, l := range strings.Split(readStr(f), "\n") {
@@ -199,7 +218,7 @@ func (s *sensors) fsFacts(put func(k, v string)) {
 	}
 	for _, f := range s.glob("/sys/fs/ext4/*/errors_count") {
 		if v := readStr(f); v != "" {
-			put("ext4_errors "+filepath.Base(filepath.Dir(f)), v)
+			put("ext4_errors "+s.stableName(filepath.Base(filepath.Dir(f))), v)
 		}
 	}
 	for _, f := range s.glob("/sys/block/md*/md/degraded") {

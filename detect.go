@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -209,29 +210,43 @@ func packages(db string) (names map[string]bool, conf []string) {
 	return
 }
 
-func backupList(path string) (out []string) {
+func backupList(path string) []string {
 	f, err := os.Open(path)
 	if err != nil {
-		return
+		return nil
 	}
 	defer f.Close()
+	defer fadvise(f, 4)
+	fadvise(f, 1)
 	// The section is at the end; skip the long file list of big packages.
 	if i, err := f.Stat(); err == nil && i.Size() > 16<<10 {
-		f.Seek(-16<<10, 2)
+		f.Seek(-16<<10, io.SeekEnd)
+		out, found, tail := backupSection(f)
+		if found || !tail {
+			return out
+		}
+		f.Seek(0, io.SeekStart) // the section is longer than that
 	}
-	in := false
-	sc := bufio.NewScanner(f)
+	out, _, _ := backupSection(f)
+	return out
+}
+
+// backupSection also tells if the header was seen and if the last line looks
+// like a part of the section (a path, a tab and a checksum).
+func backupSection(r io.Reader) (out []string, found, tail bool) {
+	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		l := sc.Text()
 		if l == "%BACKUP%" {
-			in = true
+			found = true
 			continue
 		}
-		if in {
-			p, _, _ := strings.Cut(l, "\t")
-			if strings.HasPrefix(p, "etc/") && !sensitive.MatchString(p) {
-				out = append(out, "/"+p)
-			}
+		p, _, tab := strings.Cut(l, "\t")
+		if l != "" {
+			tail = tab
+		}
+		if found && strings.HasPrefix(p, "etc/") && !sensitive.MatchString(p) {
+			out = append(out, "/"+p)
 		}
 	}
 	return

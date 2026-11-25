@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -739,5 +740,57 @@ func TestDesktopRestarts(t *testing.T) {
 	d.main.owner.instance = instance{}
 	if ev := d.changes(5); len(ev) != 1 || ev[0].New != "ended" {
 		t.Fatal(ev)
+	}
+}
+
+func TestStableDiskNames(t *testing.T) {
+	r := t.TempDir()
+	put(t, r, map[string]string{"sys/block/nvme8n1/device/model": "Alpha", "sys/block/nvme8n1/nvme8n1p2/size": "1",
+		"sys/block/nvme9n1/device/model": "Twin", "sys/block/nvme9n1/nvme9n1p1/size": "1", "sys/block/nvme7n1/device/model": "Twin"})
+	s := newSensors(defaults(), r)
+	if a, b := s.stableName("nvme8n1p2"), s.stableName("nvme9n1p1"); a != "Alpha part 2" || b != "nvme9n1p1" {
+		t.Fatal(a, b)
+	}
+}
+
+func TestClockSettles(t *testing.T) {
+	r := t.TempDir()
+	put(t, r, map[string]string{"proc/uptime": "10 1"})
+	v := "no"
+	h := &health{root: r, found: map[string]bool{"c": true}, last: map[string]float64{}, states: map[string]string{}, current: map[string]string{}}
+	h.checks = []check{{name: "c", slow: true, settle: true, state: func() (string, bool) { return v, true },
+		problem: func(_ float64, s string) string {
+			if s == "no" {
+				return "bad"
+			}
+			return ""
+		}}}
+	now := time.Now()
+	if _, p := h.run(now); len(p) != 0 {
+		t.Fatal("alarm just after boot")
+	}
+	put(t, r, map[string]string{"proc/uptime": "400 1"})
+	if _, p := h.run(now.Add(time.Minute)); len(p) != 1 {
+		t.Fatal("not checked after settling")
+	}
+	v = "yes"
+	if _, p := h.run(now.Add(2 * time.Minute)); len(p) != 0 {
+		t.Fatal("problem not rechecked")
+	}
+}
+
+func TestLongBackupSection(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "files")
+	b := "%FILES%\n" + strings.Repeat("usr/share/x\n", 3000) + "\n%BACKUP%\n"
+	for i := 0; i < 500; i++ {
+		b += fmt.Sprintf("etc/a/%d.conf\t%032d\n", i, i)
+	}
+	os.WriteFile(p, []byte(b), 0o644)
+	if n := len(backupList(p)); n != 500 {
+		t.Fatal(n)
+	}
+	os.WriteFile(p, []byte("%FILES%\n"+strings.Repeat("usr/share/x\n", 3000)), 0o644)
+	if n := len(backupList(p)); n != 0 {
+		t.Fatal(n)
 	}
 }
