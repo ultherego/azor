@@ -1,15 +1,22 @@
-<p align="center"><img src="assets/logo.png" alt="Azor" width="220"></p>
+<div align="center">
 
-# Azor
+<img src="assets/logo.png" alt="Azor logo" width="260">
 
-A small desktop telemetry recorder for Arch Linux and CachyOS. It remembers how your computer was doing – load, temperatures, disks, services, configuration and package changes – so you can ask later what happened. Hardware is detected automatically. No root, no network.
+<h1>Azor</h1>
+
+<p><b>A small desktop telemetry recorder for Arch Linux and CachyOS</b></p>
+
+</div>
+
+Azor remembers how your computer was doing – load, temperatures, disks, services, configuration and package changes – so you can ask later what happened. Hardware is detected automatically. No root, no network.
 
 ## Installation
 
 Needs Go 1.22 or newer.
 
 ```sh
-cd packaging/local
+git clone https://github.com/ultherego/azor.git
+cd azor/packaging/local
 makepkg -si
 systemctl --user enable --now azor
 ```
