@@ -18,7 +18,7 @@ import (
 
 // moduleNames lists everything Azor can collect. All are on by default.
 var moduleNames = []string{"cpu", "memory", "gpu", "disks", "network", "fans", "battery", "pressure",
-	"processes", "services", "facts", "files", "journal", "packages"}
+	"processes", "services", "timers", "filesystem", "facts", "files", "journal", "packages"}
 
 // rates turns growing counters into values per second.
 type rates struct {
@@ -152,7 +152,7 @@ func (s *sensors) readBattery(m map[string]float64) {
 
 // factsVersion changes when the set of facts changes, so that an Azor upgrade
 // does not look like a change of the computer.
-const factsVersion = "4"
+const factsVersion = "5"
 
 // facts are settings and states; a change becomes an event.
 func (s *sensors) facts() map[string]string {
@@ -195,6 +195,9 @@ func (s *sensors) facts() map[string]string {
 			put("ac_power", readStr(f))
 		}
 	}
+	if s.cfg.on("filesystem") {
+		s.fsFacts(put)
+	}
 	return out
 }
 
@@ -222,6 +225,9 @@ func failedUnits() map[string]string {
 func fileMarks(paths []string) map[string]string {
 	out := map[string]string{}
 	for _, p := range paths {
+		if !allowed(p) { // checked again: the path may be a new link
+			continue
+		}
 		i, err := os.Stat(p)
 		if err != nil {
 			out[p] = "missing"

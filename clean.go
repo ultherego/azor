@@ -66,6 +66,9 @@ func (s *State) clean() {
 	for i := range s.Failed {
 		s.Failed[i] = clean(s.Failed[i])
 	}
+	for i := range s.Timers {
+		s.Timers[i].Name, s.Timers[i].Result = clean(s.Timers[i].Name), clean(s.Timers[i].Result)
+	}
 	for i := range s.Alerts {
 		s.Alerts[i] = clean(s.Alerts[i])
 	}

@@ -150,6 +150,17 @@ func cmdNow(w io.Writer) error {
 			fmt.Fprintf(w, "  %-20s %s\n", k, s.Facts[k])
 		}
 	}
+	if f := failedTimers(s.Timers); len(f) > 0 {
+		fmt.Fprintln(w, "FAILED TIMERS:", strings.Join(f, ", "))
+	} else if len(s.Timers) > 0 {
+		n := 0
+		for _, t := range s.Timers {
+			if t.Result == "success" {
+				n++
+			}
+		}
+		fmt.Fprintf(w, "Timers: %d, none failed, %d confirmed since boot (azor timers)\n", len(s.Timers), n)
+	}
 	if len(s.Failed) > 0 {
 		fmt.Fprintln(w, "FAILED SERVICES:", strings.Join(s.Failed, ", "))
 	}
@@ -274,6 +285,13 @@ func eventLine(r Record) string {
 		return fmt.Sprintf("%s  FAILED %s", at, r.Key)
 	case "file":
 		return fmt.Sprintf("%s  file   %s changed", at, r.Key)
+	case "timer":
+		if strings.HasPrefix(r.New, "failed") {
+			return fmt.Sprintf("%s  TIMER  %s %s", at, r.Key, r.New)
+		}
+		return fmt.Sprintf("%s  timer  %s %s -> %s", at, r.Key, orNone(r.Old), orNone(r.New))
+	case "watched":
+		return fmt.Sprintf("%s  unit   %s %s -> %s", at, r.Key, orNone(r.Old), orNone(r.New))
 	case "config":
 		return fmt.Sprintf("%s  config %s: %s", at, r.Key, r.New)
 	case "package":
@@ -393,6 +411,23 @@ func cmdRange(w io.Writer, args []string) error {
 		pacman(w, "/var/log/pacman.log", from, to)
 	}
 	return nil
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
+}
+
+// failedTimers names the timers whose last run failed.
+func failedTimers(ts []timer) (out []string) {
+	for _, t := range ts {
+		if t.failed() {
+			out = append(out, t.Name)
+		}
+	}
+	return
 }
 
 func sortedKeys[T any](m map[string]T) []string {
@@ -646,6 +681,9 @@ func cmdBrief(w io.Writer) error {
 	}
 	if len(s.Failed) > 0 {
 		out += fmt.Sprintf("; failed services: %d", len(s.Failed))
+	}
+	if f := failedTimers(s.Timers); len(f) > 0 {
+		out += "; FAILED TIMERS: " + strings.Join(f, ", ")
 	}
 	n := map[string]float64{}
 	now := time.Now()

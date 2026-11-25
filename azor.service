@@ -9,8 +9,32 @@ Nice=10
 IOSchedulingClass=idle
 CPUQuota=5%
 MemoryMax=48M
+UMask=0077
+StateDirectory=azor
+RuntimeDirectory=azor
+
+# No internet, no new privileges, nothing writable except its own data.
 NoNewPrivileges=yes
 RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%S/azor %t/azor
+PrivateTmp=no
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+
+# The kernel hides these places from Azor, whatever its code or configuration says.
+InaccessiblePaths=-%h/.ssh -%h/.gnupg -%h/.password-store -%h/.pki -%h/.aws -%h/.kube -%h/.docker -%h/.azure
+InaccessiblePaths=-%h/.netrc -%h/.git-credentials -%h/.mozilla -%h/.thunderbird -%h/.cache
+InaccessiblePaths=-%h/.local/share/keyrings -%h/.local/share/kwalletd -%h/.local/share/Steam
+InaccessiblePaths=-%h/.config/1Password -%h/.config/Bitwarden -%h/.config/keepassxc -%h/.config/rclone -%h/.config/gh -%h/.config/op
+InaccessiblePaths=-%h/.config/mozilla -%h/.config/chromium -%h/.config/google-chrome -%h/.config/BraveSoftware -%h/.config/vivaldi -%h/.config/microsoft-edge
+InaccessiblePaths=-%h/.bash_history -%h/.zsh_history -%h/.local/share/fish -%h/.local/share/cliphist -%h/.var
 
 [Install]
 WantedBy=default.target

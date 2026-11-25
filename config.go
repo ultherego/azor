@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"io"
 	"os"
@@ -11,16 +12,19 @@ import (
 	"time"
 )
 
+//go:embed azor.conf
+var sampleConfig string
+
 // Config comes from built-in defaults, then /etc/azor/azor.conf, then the
 // user's azor.conf. Hardware never has to be described here.
 type Config struct {
-	Sample, Interval, ProcInterval time.Duration
-	Retention                      int
-	Off                            map[string]bool // disabled modules
-	TopN                           int
-	WatchProcs, WatchFiles         []string
-	GPU                            string // auto, off or a PCI slot
-	Alerts                         map[string]float64
+	Sample, Interval, ProcInterval                   time.Duration
+	Retention                                        int
+	Off                                              map[string]bool // disabled modules
+	TopN                                             int
+	WatchProcs, WatchFiles, WatchUnits, IgnoreTimers []string
+	GPU                                              string // auto, off or a PCI slot
+	Alerts                                           map[string]float64
 }
 
 func defaults() Config {
@@ -124,6 +128,21 @@ func (c *Config) set(k, v string) bool {
 	case "watch.processes":
 		c.WatchProcs = list(v)
 		return len(c.WatchProcs) <= 50
+	case "watch.units":
+		c.WatchUnits = nil
+		for _, u := range list(v) {
+			if !unitName.MatchString(u) || strings.HasPrefix(u, "-") {
+				return false
+			}
+			if !strings.Contains(u, ".") {
+				u += ".service"
+			}
+			c.WatchUnits = append(c.WatchUnits, u)
+		}
+		return len(c.WatchUnits) <= 50
+	case "ignore.timers":
+		c.IgnoreTimers = list(v)
+		return true
 	case "watch.files":
 		c.WatchFiles = nil
 		for _, p := range list(v) {
@@ -132,6 +151,9 @@ func (c *Config) set(k, v string) bool {
 			}
 			if !filepath.IsAbs(p) {
 				return false
+			}
+			if !allowed(p) {
+				return false // a hard limit, see forbidden.go
 			}
 			c.WatchFiles = append(c.WatchFiles, p)
 		}
@@ -195,8 +217,8 @@ func cmdConfig(w io.Writer) error {
 			mods = append(mods, m)
 		}
 	}
-	fmt.Fprintf(w, "modules = %s\nsample = %s\ninterval = %s\nprocess_interval = %s\nretention = %d\ntop = %d\ngpu = %s\nwatch.processes = %s\nwatch.files = %s\n",
-		strings.Join(mods, ", "), c.Sample, c.Interval, c.ProcInterval, c.Retention, c.TopN, c.GPU, strings.Join(c.WatchProcs, ", "), strings.Join(c.WatchFiles, ", "))
+	fmt.Fprintf(w, "modules = %s\nsample = %s\ninterval = %s\nprocess_interval = %s\nretention = %d\ntop = %d\ngpu = %s\nwatch.processes = %s\nwatch.files = %s\nwatch.units = %s\nignore.timers = %s\n",
+		strings.Join(mods, ", "), c.Sample, c.Interval, c.ProcInterval, c.Retention, c.TopN, c.GPU, strings.Join(c.WatchProcs, ", "), strings.Join(c.WatchFiles, ", "), strings.Join(c.WatchUnits, ", "), strings.Join(c.IgnoreTimers, ", "))
 	var ks []string
 	for k := range c.Alerts {
 		ks = append(ks, k)

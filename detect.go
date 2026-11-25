@@ -194,7 +194,7 @@ func userConfigs(home string, known map[string]bool) map[string][]string {
 	es, _ := os.ReadDir(home)
 	for _, e := range es {
 		name := e.Name()
-		if !known[normal(name)] || sensitive.MatchString(name) {
+		if !known[normal(name)] || sensitive.MatchString(name) || forbidden.MatchString(name) {
 			continue
 		}
 		p := filepath.Join(home, name)
@@ -325,6 +325,15 @@ func (c *configScan) discover(running []string) {
 		if i, err := os.Stat(p); err == nil && i.Mode().IsRegular() && len(t["/etc"]) < maxFiles {
 			t["/etc"] = append(t["/etc"], p)
 		}
+	}
+	for prog, files := range t {
+		var ok []string
+		for _, f := range files {
+			if allowed(f) {
+				ok = append(ok, f)
+			}
+		}
+		t[prog] = ok
 	}
 	c.targets, c.found = t, time.Now()
 }

@@ -18,6 +18,8 @@ Usage:
   azor status               daemon health and storage
   azor brief                one short line (for hooks)
   azor hardware             detected sensors and alert limits
+  azor timers               scheduled jobs and their last result
+  azor init                 create ~/.config/azor/azor.conf
   azor files                detected configuration files
   azor config               effective configuration
   azor daemon               run the collector (used by systemd)
@@ -68,6 +70,10 @@ func main() {
 		err = cmdBrief(os.Stdout)
 	case "hardware":
 		err = cmdHardware(os.Stdout)
+	case "timers":
+		err = cmdTimers(os.Stdout)
+	case "init":
+		err = cmdInit(os.Stdout)
 	case "files":
 		err = cmdFiles(os.Stdout)
 	case "config":

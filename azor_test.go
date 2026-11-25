@@ -443,3 +443,118 @@ func TestUntrustedNames(t *testing.T) {
 		}
 	})
 }
+
+func TestTimers(t *testing.T) {
+	ts := parseTimers([]byte(`[{"next":5000000,"left":1,"last":3000000,"passed":1,"unit":"a.timer","activates":"a.service"},{"next":null,"last":0,"unit":"b.timer","activates":"b.service"},{"unit":"x\u001b.timer","activates":"c"}]`), false)
+	if len(ts) != 2 || ts[0].Last != 3 || ts[0].Next != 5 || ts[1].Last != 0 {
+		t.Fatal(ts)
+	}
+	info := parseShow("Id=a.service\nResult=exit-code\nActiveState=failed\n\nId=b.service\nResult=success\nActiveState=activating\n")
+	ts[0].Result, ts[1].Result = result(info["a.service"]), result(info["b.service"])
+	if !ts[0].failed() || ts[1].failed() || ts[1].Result != "running" {
+		t.Fatal(ts)
+	}
+	st := timerStates(ts)
+	if len(st) != 1 || st["a"] != "failed: exit-code" || len(failedTimers(ts)) != 1 {
+		t.Fatal(st)
+	}
+}
+
+func TestFilesystemErrors(t *testing.T) {
+	r := t.TempDir()
+	put(t, r, map[string]string{"sys/fs/btrfs/uuid/devinfo/1/error_stats": "write_errs 0\ncorruption_errs 3", "sys/fs/btrfs/uuid/devices/sdz1/x": "", "sys/fs/ext4/sdy1/errors_count": "0", "sys/block/md0/md/degraded": "1"})
+	m := map[string]string{}
+	(&sensors{root: r}).fsFacts(func(k, v string) { m[k] = v })
+	if m["btrfs_errors sdz1"] != "corruption 3" || m["ext4_errors sdy1"] != "0" || m["raid_degraded md0"] != "1" {
+		t.Fatal(m)
+	}
+}
+
+func TestUserConfigAdditionsAndInit(t *testing.T) {
+	c := defaults()
+	if w := c.apply("watch.units = foo, bar.timer\nignore.timers = x\nwatch.units = --bad", "f"); len(w) != 1 || c.IgnoreTimers[0] != "x" {
+		t.Fatal(w, c)
+	}
+	d := defaults()
+	if w := d.apply(sampleConfig, "sample"); len(w) != 0 {
+		t.Fatal(w)
+	}
+	var on []string // every commented setting of the sample must be valid
+	for _, l := range strings.Split(sampleConfig, "\n") {
+		if strings.HasPrefix(l, "#") && !strings.HasPrefix(l, "# ") && strings.Contains(l, " = ") {
+			on = append(on, l[1:])
+		}
+	}
+	if w := d.apply(strings.Join(on, "\n"), "sample"); len(w) != 0 || len(on) < 10 {
+		t.Fatal(w, on)
+	}
+	h := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", h)
+	var b bytes.Buffer
+	if err := cmdInit(&b); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(h, "azor", "azor.conf")
+	os.WriteFile(p, []byte("retention = 3"), 0o600)
+	cmdInit(&b)
+	if readStr(p) != "retention = 3" {
+		t.Fatal("overwritten")
+	}
+}
+
+func TestTimerNotRunSinceBootIsUnknown(t *testing.T) {
+	x := timer{Name: "a", Last: 5, Result: result(map[string]string{"Result": "success", "ActiveState": "inactive"})}
+	if x.Result != "unknown" || x.failed() || len(timerStates([]timer{x})) != 0 {
+		t.Fatal(x)
+	}
+	if r := result(map[string]string{"Result": "success", "ActiveState": "inactive", "ExecMainExitTimestamp": "@5"}); r != "success" {
+		t.Fatal(r)
+	}
+}
+
+func TestForbiddenIsAHardLimit(t *testing.T) {
+	h := t.TempDir()
+	t.Setenv("HOME", h)
+	for _, p := range []string{"~/.ssh/config", "~/.ssh", "~/.gnupg/gpg.conf", "~/.local/share/keyrings/x", "~/.password-store/a", "~/.config/1Password/a", "~/.config/Bitwarden/data.json",
+		"~/.config/rclone/rclone.conf", "~/.config/gh/hosts.yml", "~/.aws/credentials", "~/.kube/config", "~/.mozilla/x", "~/.config/chromium/Default/x", "~/.cache/cliphist/db", "~/.netrc",
+		"~/project/.env", "~/project/.env.local", "/etc/shadow", "/etc/sudoers", "/etc/pam.d/su", "/etc/wireguard/wg0.conf", "/etc/borgmatic.d/passphrase", "/etc/ssh/sshd_config", "~/.bash_history", "~/a.pem", "~/db.kdbx", "~/my-passwords.txt", "~/x/api_token", "~/.docker/config.json"} {
+		c := defaults()
+		if w := c.apply("watch.files = "+p, "f"); len(w) != 1 || len(c.WatchFiles) != 0 {
+			t.Errorf("accepted %s", p)
+		}
+	}
+	for _, p := range []string{"/etc/pacman.conf", "/etc/fstab", "~/.config/foo/config.kdl", "~/scripts/compass.sh", "~/page.conf", "~/message.conf"} {
+		c := defaults()
+		if w := c.apply("watch.files = "+p, "f"); len(w) != 0 {
+			t.Errorf("refused %s", p)
+		}
+	}
+	put(t, h, map[string]string{".ssh/x": "1"})
+	link := filepath.Join(h, "innocent.conf")
+	os.Symlink(filepath.Join(h, ".ssh/x"), link)
+	if len(fileMarks([]string{link})) != 0 || allowed(link) {
+		t.Error("symlink escapes the limit")
+	}
+	put(t, h, map[string]string{"cfg/foo/a.conf": "1", "cfg/rclone/r.conf": "1", "cfg/ssh/a.conf": "1"})
+	s := &configScan{home: filepath.Join(h, "cfg"), db: t.TempDir(), etc: t.TempDir(), noisy: map[string]int{}}
+	s.discover([]string{"foo", "rclone", "ssh"})
+	if len(s.all()) != 1 {
+		t.Error(s.all())
+	}
+}
+
+// Azor must not gain network, clipboard or write access by accident.
+func TestSourceStaysHarmless(t *testing.T) {
+	fs, _ := filepath.Glob("*.go")
+	for _, f := range fs {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, _ := os.ReadFile(f)
+		for _, bad := range []string{"net/http", "\"tcp", "\"udp", "wl-paste", "xclip", "xsel", "wl-copy", "org.freedesktop.secrets", "secret-tool", "/environ\"", "/cmdline\"", "/fd/", "os.Chmod", "os.Chown"} {
+			if strings.Contains(string(b), bad) {
+				t.Errorf("%s contains %s", f, bad)
+			}
+		}
+	}
+}

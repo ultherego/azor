@@ -149,6 +149,7 @@ type State struct {
 	FS       map[string]float64 `json:"fs,omitempty"`
 	Facts    map[string]string  `json:"facts,omitempty"`
 	Failed   []string           `json:"failed,omitempty"`
+	Timers   []timer            `json:"timers,omitempty"`
 }
 
 func runDaemon() error {
@@ -226,7 +227,25 @@ func runDaemon() error {
 			store(e)
 		}
 	}
+	var timersAt time.Time
 	slow := func(t time.Time) {
+		if cfg.on("timers") && time.Since(timersAt) >= 5*time.Minute {
+			timersAt = time.Now()
+			if ts, ok := readTimers(cfg.IgnoreTimers); ok {
+				st.Timers = ts
+				// A result is kept until the next known one, also over a reboot.
+				cur := timerStates(ts)
+				for k, v := range seen["timer"] {
+					if _, ok := cur[k]; !ok {
+						cur[k] = v
+					}
+				}
+				change("timer", cur, t)
+			}
+		}
+		if u := watchedUnits(cfg.WatchUnits); u != nil {
+			change("watched", u, t)
+		}
 		if cfg.on("facts") {
 			st.Facts = s.facts()
 			change("fact", st.Facts, t)
