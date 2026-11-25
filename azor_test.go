@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -350,18 +352,123 @@ func TestServicesFromCgroups(t *testing.T) {
 	}
 }
 
-func TestPeerNameOfOwnSocket(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "s")
+func TestLocks(t *testing.T) {
+	h := lockHolders("1: FLOCK  ADVISORY  WRITE 42 00:2a:77 0 EOF\n2: POSIX  ADVISORY  WRITE 43 00:2a:78 0 EOF\n2: -> FLOCK  ADVISORY  WRITE 44 00:2a:79 0 EOF\nx")
+	if len(h) != 1 || h["00:2a:77"] != 42 {
+		t.Fatal(h)
+	}
+	p := filepath.Join(t.TempDir(), "wayland-9.lock")
+	f, _ := os.Create(p)
+	defer f.Close()
+	if syscall.Flock(int(f.Fd()), syscall.LOCK_EX) != nil {
+		t.Skip("no flock")
+	}
+	if got := lockHolders(readStr("/proc/locks"))[lockKey(p)]; got != os.Getpid() {
+		t.Skipf("filesystem reports another device number: %d", got)
+	}
+	l, _ := net.Listen("unix", strings.TrimSuffix(p, ".lock"))
+	defer l.Close()
+	if s := waylandServers(filepath.Dir(p)); len(s) != 1 || s[0].owner.PID != os.Getpid() {
+		t.Fatal(s)
+	}
+}
+
+// fakeCompositor answers like a display server and records what was bound.
+func fakeCompositor(t *testing.T, script func(c net.Conn)) string {
+	p := filepath.Join(t.TempDir(), "w")
 	l, err := net.Listen("unix", p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
-	if n := peerName(p); n != readStr("/proc/self/comm") {
-		t.Fatal(n)
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		script(c)
+	}()
+	return p
+}
+
+func wlGlobal(name uint32, iface string, ver uint32) []byte {
+	n := uint32(len(iface) + 1)
+	words := []uint32{name, n}
+	b := append([]byte(iface), 0)
+	for len(b)%4 != 0 {
+		b = append(b, 0)
 	}
-	if peerName(p+"x") != "" {
-		t.Fatal("missing socket")
+	for i := 0; i < len(b); i += 4 {
+		words = append(words, ne.Uint32(b[i:]))
+	}
+	return wlMsg(2, 0, append(words, ver)...)
+}
+
+func TestWaylandOutputsOnly(t *testing.T) {
+	var bound []byte
+	done := make(chan bool, 1)
+	p := fakeCompositor(t, func(c net.Conn) {
+		io.ReadFull(c, make([]byte, 24))
+		var b []byte
+		b = append(b, wlGlobal(1, "wl_data_device_manager", 3)...)
+		b = append(b, wlGlobal(7, "wl_output", 4)...)
+		b = append(b, wlGlobal(8, "zwlr_screencopy_manager_v1", 1)...)
+		c.Write(append(b, wlMsg(3, 0, 0)...))
+		bound = make([]byte, 36+12)
+		io.ReadFull(c, bound)
+		b = wlMsg(4, 1, 0, 800, 600, 60000) // not current
+		b = append(b, wlMsg(4, 1, 1, 1920, 1080, 75000)...)
+		b = append(b, wlMsg(4, 4, 5, ne.Uint32([]byte("HD-1")), 0)...)
+		c.Write(append(b, wlMsg(5, 0, 0)...))
+		done <- true
+	})
+	o, err := readOutputs(p, uint32(os.Getuid()))
+	<-done
+	if err != nil || len(o) != 1 || o[0].W != 1920 || o[0].MHz != 75000 || o[0].Name != "HD-1" {
+		t.Fatal(o, err)
+	}
+	if !bytes.Contains(bound, []byte("wl_output")) || bytes.Contains(bound, []byte("data_device")) || bytes.Contains(bound, []byte("screencopy")) {
+		t.Fatalf("%q", bound)
+	}
+}
+
+func TestWaylandGarbage(t *testing.T) {
+	for _, junk := range [][]byte{{1, 2, 3}, wlMsg(1, 0, 1, 1, 1), append(ne.AppendUint32(nil, 2), 0, 0, 3, 0), bytes.Repeat([]byte{0xff}, 4096), bytes.Repeat(wlMsg(99, 1, 0), 40000)} {
+		p := fakeCompositor(t, func(c net.Conn) { io.ReadFull(c, make([]byte, 24)); c.Write(junk) })
+		if o, err := readOutputs(p, uint32(os.Getuid())); err == nil {
+			t.Fatal(o)
+		}
+	}
+	p := fakeCompositor(t, func(c net.Conn) {})
+	if _, err := readOutputs(p, 4242424); err == nil {
+		t.Fatal("foreign socket accepted")
+	}
+}
+
+func TestConnectorsAndOwners(t *testing.T) {
+	r := t.TempDir()
+	put(t, r, map[string]string{"sys/class/drm/card9-AA-1/status": "connected", "sys/class/drm/card9-AA-1/enabled": "enabled", "sys/class/drm/card9-AA-1/dpms": "Off",
+		"sys/class/drm/card9-BB-1/status": "disconnected", "sys/class/drm/card9-Writeback-1/status": "unknown", "sys/class/drm/card9-AA-1/edid": "SERIAL"})
+	m := map[string]string{}
+	connectors(r, func(k, v string) { m[k] = v })
+	if len(m) != 2 || m["connector AA-1"] != "connected, off" || m["displays"] != "1" {
+		t.Fatal(m)
+	}
+	d := t.TempDir()
+	put(t, d, map[string]string{"foo-bar-2.5-1/files": "%FILES%\nusr/bin/\nusr/bin/foo\n\n%BACKUP%\nusr/bin/no\tx", "x-1-1/files": "%FILES%\nusr/bin/other"})
+	o := owners(d, map[string]bool{"foo": true, "no": true})
+	if len(o) != 1 || o["foo"] != "2.5-1" {
+		t.Fatal(o)
+	}
+	for in, want := range map[string]string{"app-x-foo-mww97yyiwfrl.scope": "app-x-foo", "foo-70329-0.scope": "foo", "app-foo@1a2b3c4d5e.service": "app-foo",
+		"pipewire-pulse.service": "pipewire-pulse", "xdg-desktop-portal-gtk.service": "xdg-desktop-portal-gtk"} {
+		if got := unitLabel(in); got != want {
+			t.Errorf("%s: %s", in, got)
+		}
+	}
+	if unitLabel("app-foo-bar-12345.scope") != "app-foo-bar" || unitLabel("foo.service") != "foo" {
+		t.Fatal(unitLabel("app-foo-bar-12345.scope"))
 	}
 }
 
@@ -599,5 +706,38 @@ func TestSwapAndTuning(t *testing.T) {
 	f := s.facts()
 	if f["io_schedulers"] != "foo" || f["huge_pages"] != "madvise" || f["cpu_boost"] != "" {
 		t.Fatal(f)
+	}
+}
+
+func TestDesktopRestarts(t *testing.T) {
+	r := t.TempDir()
+	os.MkdirAll(r+"/systemd/units", 0o755)
+	link := func(id string) {
+		p := r + "/systemd/units/invocation:azor-test-none.service"
+		os.Remove(p)
+		os.Symlink(id, p)
+	}
+	d := &desktop{runtime: r, part: map[string]bool{"azor-test-none.service": true}, prevCPU: map[string]float64{}}
+	link("a")
+	d.main.owner.instance = instance{0, "", ""}
+	if ev := d.changes(1); len(ev) != 0 {
+		t.Fatal("event on first look", ev)
+	}
+	if ev := d.changes(2); len(ev) != 0 {
+		t.Fatal("event without change", ev)
+	}
+	link("b")
+	ev := d.changes(3)
+	if len(ev) != 1 || ev[0].Key != "azor-test-none" || !strings.Contains(ev[0].New, "restarted") {
+		t.Fatal(ev)
+	}
+	// the number is the same, but it is another process
+	d.owner, d.main.owner.instance = instance{1 << 30, "5", "srv"}, instance{1 << 30, "6", "srv"}
+	if ev := d.changes(4); len(ev) != 1 || ev[0].New != "srv restarted" {
+		t.Fatal(ev)
+	}
+	d.main.owner.instance = instance{}
+	if ev := d.changes(5); len(ev) != 1 || ev[0].New != "ended" {
+		t.Fatal(ev)
 	}
 }

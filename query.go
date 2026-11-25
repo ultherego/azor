@@ -127,6 +127,12 @@ func cmdNow(w io.Writer) error {
 	}
 	fmt.Fprintln(w, "Processes (1 thread = 100%)")
 	fmt.Fprintf(w, "  CPU: %s\n  RAM: %s\n", procList(s.CPU), procList(s.Mem))
+	if len(s.Desktop) > 0 {
+		fmt.Fprintln(w, "Desktop (azor desktop)")
+		for _, p := range s.Desktop[:min(len(s.Desktop), 8)] {
+			fmt.Fprintf(w, "  %-28s CPU %3.0f%%  RAM %5.0f MB\n", p.Name, p.CPU, p.MB)
+		}
+	}
 	if len(s.Services) > 0 {
 		fmt.Fprintln(w, "User services")
 		for _, p := range s.Services {
@@ -295,6 +301,8 @@ func eventLine(r Record) string {
 		return fmt.Sprintf("%s  timer  %s %s -> %s", at, r.Key, orNone(r.Old), orNone(r.New))
 	case "watched":
 		return fmt.Sprintf("%s  unit   %s %s -> %s", at, r.Key, orNone(r.Old), orNone(r.New))
+	case "desktop":
+		return fmt.Sprintf("%s  desktop %s: %s", at, r.Key, r.New)
 	case "health":
 		return fmt.Sprintf("%s  health %s: %s -> %s", at, r.Key, orNone(r.Old), orNone(r.New))
 	case "config":
@@ -340,7 +348,7 @@ func cmdRange(w io.Writer, args []string) error {
 			for _, p := range r.Mem {
 				mem[p.Name] = max(mem[p.Name], p.MB)
 			}
-			for _, p := range r.Services {
+			for _, p := range append(append([]proc{}, r.Services...), r.Desktop...) {
 				old, seen := svcs[p.Name]
 				if !seen {
 					old[0] = p.MB

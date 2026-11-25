@@ -151,6 +151,7 @@ type State struct {
 	Failed   []string           `json:"failed,omitempty"`
 	Timers   []timer            `json:"timers,omitempty"`
 	Problems []string           `json:"problems,omitempty"`
+	Desktop  []proc             `json:"desktop,omitempty"`
 }
 
 func runDaemon() error {
@@ -229,7 +230,12 @@ func runDaemon() error {
 		}
 	}
 	var timersAt time.Time
+	desktopAt := now
 	var hl *health
+	var dt *desktop
+	if cfg.on("desktop") {
+		dt = newDesktop()
+	}
 	if cfg.on("health") {
 		hl = newHealth("")
 	}
@@ -260,7 +266,24 @@ func runDaemon() error {
 		}
 		if cfg.on("facts") {
 			st.Facts = s.facts()
+			if dt != nil {
+				dt.facts(t, func(k, v string) {
+					if v != "" {
+						st.Facts[cleanTo(k, 80)] = v
+					}
+				})
+			}
 			change("fact", st.Facts, t)
+		}
+		if dt != nil {
+			for _, e := range dt.changes(t.Unix()) {
+				store(e)
+			}
+			st.Desktop = dt.scan(t.Sub(desktopAt).Seconds())
+			desktopAt = t
+			if len(st.Desktop) > 0 {
+				store(Record{T: t.Unix(), Type: "procs", Desktop: st.Desktop})
+			}
 		}
 		if cfg.on("services") {
 			st.Failed = nil
@@ -286,6 +309,9 @@ func runDaemon() error {
 			if sum, names := pac.next(); sum != "" {
 				store(Record{T: t.Unix(), Type: "event", Kind: "package", Key: sum, New: names})
 				conf.found = time.Time{} // programs changed
+				if dt != nil {
+					dt.versions = nil
+				}
 			}
 		}
 	}
@@ -377,7 +403,7 @@ func running(st State) (out []string) {
 			out = append(out, p.Name)
 		}
 	}
-	for _, k := range []string{"desktop", "wayland_server", "x11_server"} {
+	for _, k := range []string{"desktop", "display_server"} {
 		out = append(out, strings.FieldsFunc(st.Facts[k], func(r rune) bool { return r == ' ' || r == ':' })...)
 	}
 	return

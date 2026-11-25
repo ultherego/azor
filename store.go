@@ -22,6 +22,7 @@ type Record struct {
 	CPU      []proc             `json:"top_cpu,omitempty"`
 	Mem      []proc             `json:"top_mem,omitempty"`
 	Watch    []proc             `json:"watch,omitempty"`
+	Desktop  []proc             `json:"desktop,omitempty"`
 	Services []proc             `json:"services,omitempty"`
 	Facts    map[string]string  `json:"facts,omitempty"`
 	Old      string             `json:"old,omitempty"`

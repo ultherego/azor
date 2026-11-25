@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,35 +10,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
 // Nothing in this file knows the name of a desktop, program or configuration
 // file: the running system is asked instead.
-
-// peerName returns the name of the process listening on a Unix socket.
-func peerName(path string) string {
-	c, err := net.DialTimeout("unix", path, time.Second)
-	if err != nil {
-		return ""
-	}
-	defer c.Close()
-	raw, err := c.(*net.UnixConn).SyscallConn()
-	if err != nil {
-		return ""
-	}
-	pid := 0
-	raw.Control(func(fd uintptr) {
-		if u, e := syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED); e == nil {
-			pid = int(u.Pid)
-		}
-	})
-	if pid <= 0 {
-		return ""
-	}
-	return readStr("/proc/" + strconv.Itoa(pid) + "/comm")
-}
 
 // session asks logind for the desktop name and session type, so that the
 // session environment, which may hold secrets, is never read.
@@ -72,44 +47,19 @@ func parseSession(s string) (desktop, kind string) {
 	return
 }
 
-// desktopFacts finds the display servers of this session by their sockets.
-func desktopFacts(put func(k, v string)) {
-	d, t := session()
-	put("desktop", d)
-	put("session_type", t)
-	find := func(key, pattern string) {
-		m, _ := filepath.Glob(pattern)
-		seen := map[string]bool{}
-		for _, p := range m {
-			if i, err := os.Stat(p); err == nil && i.Mode()&os.ModeSocket != 0 {
-				if n := peerName(p); n != "" {
-					seen[n] = true
-				}
-			}
-		}
-		put(key, strings.Join(sortedKeys(seen), " "))
-	}
-	find("wayland_server", filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "wayland-[0-9]*"))
-	find("x11_server", "/tmp/.X11-unix/X[0-9]*")
-}
-
 type svcScan struct{ prev map[string]float64 }
 
 // scan measures the user's running services, which include the desktop
 // components, from their control groups.
 func (s *svcScan) scan(root string, seconds float64) (out []proc) {
-	cur := map[string]float64{}
-	var dirs []string
-	for _, p := range []string{"/session.slice/*.service", "/app.slice/*.service", "/app.slice/*.slice/*.service", "/background.slice/*.service"} {
-		m, _ := filepath.Glob(root + p)
-		dirs = append(dirs, m...)
-	}
+	cur, at := map[string]float64{}, map[string]int{}
+	dirs := leaves(root)
 	for _, d := range dirs {
 		mem, ok := readNum(d + "/memory.current")
 		if !ok {
 			continue
 		}
-		name := unescape(strings.TrimSuffix(filepath.Base(d), ".service"))
+		name := unitLabel(filepath.Base(d))
 		p := proc{Name: name, MB: round1(mem / (1 << 20))}
 		for _, l := range strings.Split(readStr(d+"/cpu.stat"), "\n") {
 			if v, ok := strings.CutPrefix(l, "usage_usec "); ok {
@@ -120,6 +70,11 @@ func (s *svcScan) scan(root string, seconds float64) (out []proc) {
 				cur[d] = u
 			}
 		}
+		if i, ok := at[name]; ok { // several copies of one program
+			out[i].CPU, out[i].MB = round1(out[i].CPU+p.CPU), round1(out[i].MB+p.MB)
+			continue
+		}
+		at[name] = len(out)
 		out = append(out, p)
 	}
 	s.prev = cur

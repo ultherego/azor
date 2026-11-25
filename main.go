@@ -18,6 +18,7 @@ Usage:
   azor status               daemon health and storage
   azor brief                one short line (for hooks)
   azor hardware             detected sensors and alert limits
+  azor desktop             detected desktop, displays and its parts
   azor health              detected health checks and problems
   azor timers               scheduled jobs and their last result
   azor init                 create ~/.config/azor/azor.conf
@@ -71,6 +72,8 @@ func main() {
 		err = cmdBrief(os.Stdout)
 	case "hardware":
 		err = cmdHardware(os.Stdout)
+	case "desktop":
+		err = cmdDesktop(os.Stdout)
 	case "health":
 		err = cmdHealth(os.Stdout)
 	case "timers":
