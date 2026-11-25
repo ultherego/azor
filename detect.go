@@ -48,41 +48,6 @@ func parseSession(s string) (desktop, kind string) {
 	return
 }
 
-type svcScan struct{ prev map[string]float64 }
-
-// scan measures the user's running services, which include the desktop
-// components, from their control groups.
-func (s *svcScan) scan(root string, seconds float64) (out []proc) {
-	cur, at := map[string]float64{}, map[string]int{}
-	dirs := leaves(root)
-	for _, d := range dirs {
-		mem, ok := readNum(d + "/memory.current")
-		if !ok {
-			continue
-		}
-		name := unitLabel(filepath.Base(d))
-		p := proc{Name: name, MB: round1(mem / (1 << 20))}
-		for _, l := range strings.Split(readStr(d+"/cpu.stat"), "\n") {
-			if v, ok := strings.CutPrefix(l, "usage_usec "); ok {
-				u, _ := strconv.ParseFloat(v, 64)
-				if old, seen := s.prev[d]; seen && u >= old && seconds > 0 {
-					p.CPU = round1((u - old) / seconds / 1e4)
-				}
-				cur[d] = u
-			}
-		}
-		if i, ok := at[name]; ok { // several copies of one program
-			out[i].CPU, out[i].MB = round1(out[i].CPU+p.CPU), round1(out[i].MB+p.MB)
-			continue
-		}
-		at[name] = len(out)
-		out = append(out, p)
-	}
-	s.prev = cur
-	sort.Slice(out, func(a, b int) bool { return out[a].MB > out[b].MB })
-	return
-}
-
 var hexEscape = regexp.MustCompile(`\\x[0-9a-f]{2}`)
 
 // unescape turns a systemd unit name such as a\x2db into a-b.

@@ -146,6 +146,7 @@ type State struct {
 	Mem      []proc             `json:"top_mem"`
 	Watch    []proc             `json:"watch,omitempty"`
 	Services []proc             `json:"services,omitempty"`
+	System   []proc             `json:"system,omitempty"`
 	FS       map[string]float64 `json:"fs,omitempty"`
 	Facts    map[string]string  `json:"facts,omitempty"`
 	Failed   []string           `json:"failed,omitempty"`
@@ -201,7 +202,7 @@ func runDaemon() error {
 
 	s, ps, a := newSensors(cfg, ""), &procScan{}, newAgg()
 	al := alerts{makeRules(cfg, s.crit), map[string]*alert{}}
-	st, pac, svc, conf := State{}, newPacTail("/var/log/pacman.log"), &svcScan{}, newConfigScan()
+	st, pac, svc, sys, conf := State{}, newPacTail("/var/log/pacman.log"), &svcScan{}, &svcScan{}, newConfigScan()
 	if cfg.on("processes") {
 		_, _, st.Watch = ps.top(0, cfg.TopN, cfg.WatchProcs)
 	}
@@ -210,6 +211,7 @@ func runDaemon() error {
 	for _, p := range svc.scan(userCgroup(), 0) {
 		svcNames = append(svcNames, p.Name)
 	}
+	sys.scan(systemCgroup, 0)
 	// slow watches settings, services and declared files for changes.
 	seen := map[string]map[string]string{}
 	change := func(kind string, cur map[string]string, t time.Time) {
@@ -365,8 +367,11 @@ func runDaemon() error {
 				for _, p := range all {
 					svcNames = append(svcNames, p.Name)
 				}
-				st.Services = all[:min(len(all), cfg.TopN)]
-				store(Record{T: now.Unix(), Type: "procs", CPU: st.CPU, Mem: st.Mem, Watch: st.Watch, Services: st.Services})
+				st.Services = notable(all, cfg.TopN)
+				if cfg.on("services") {
+					st.System = notable(sys.scan(systemCgroup, d.Seconds()), 3)
+				}
+				store(Record{T: now.Unix(), Type: "procs", CPU: st.CPU, Mem: st.Mem, Watch: st.Watch, Services: st.Services, System: st.System})
 			}
 			if cfg.on("disks") {
 				if fs := filesystems(readStr("/proc/self/mounts"), fsUsed); len(fs) > 0 {

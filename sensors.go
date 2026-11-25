@@ -41,6 +41,8 @@ type sensors struct {
 	div                 map[string]float64 // metric -> divisor
 	crit                map[string]float64 // metric -> critical limit reported by the device
 	disks               map[string]string
+	labels              map[string]string
+	labelsAt            time.Time
 	fans, freqFiles     []string
 	rt                  *rates
 	lastGPU             time.Time
@@ -382,6 +384,14 @@ type proc struct {
 	Name string  `json:"name"`
 	CPU  float64 `json:"cpu,omitempty"` // percent of one thread
 	MB   float64 `json:"mb,omitempty"`
+
+	// services only
+	VRAM     float64 `json:"vram,omitempty"`
+	Read     float64 `json:"read,omitempty"`      // MB/s
+	Write    float64 `json:"write,omitempty"`     // MB/s
+	StallCPU float64 `json:"stall_cpu,omitempty"` // percent of time that a part was waiting
+	StallMem float64 `json:"stall_mem,omitempty"`
+	StallIO  float64 `json:"stall_io,omitempty"`
 }
 
 type procScan struct{ prev map[string]uint64 }

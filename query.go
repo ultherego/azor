@@ -130,13 +130,19 @@ func cmdNow(w io.Writer) error {
 	if len(s.Desktop) > 0 {
 		fmt.Fprintln(w, "Desktop (azor desktop)")
 		for _, p := range s.Desktop[:min(len(s.Desktop), 8)] {
-			fmt.Fprintf(w, "  %-28s CPU %3.0f%%  RAM %5.0f MB\n", p.Name, p.CPU, p.MB)
+			fmt.Fprintf(w, "  %-28s CPU %3.0f%%  RAM %5.0f MB%s\n", p.Name, p.CPU, p.MB, p.extras())
 		}
 	}
 	if len(s.Services) > 0 {
 		fmt.Fprintln(w, "User services")
 		for _, p := range s.Services {
-			fmt.Fprintf(w, "  %-28s CPU %3.0f%%  RAM %5.0f MB\n", p.Name, p.CPU, p.MB)
+			fmt.Fprintf(w, "  %-28s CPU %3.0f%%  RAM %5.0f MB%s\n", p.Name, p.CPU, p.MB, p.extras())
+		}
+	}
+	if len(s.System) > 0 {
+		fmt.Fprintln(w, "System services")
+		for _, p := range s.System {
+			fmt.Fprintf(w, "  %-28s CPU %3.0f%%  RAM %5.0f MB%s\n", p.Name, p.CPU, p.MB, p.extras())
 		}
 	}
 	for _, p := range s.Watch {
@@ -328,7 +334,7 @@ func cmdRange(w io.Writer, args []string) error {
 	step := to.Sub(from) / rows
 	all, parts := newSummary(), make([]*summary, rows)
 	var events []Record
-	svcs := map[string][2]float64{}
+	svcs, peaks := map[string][2]float64{}, map[string]proc{}
 	cpu, mem, watch, fs := map[string]float64{}, map[string]float64{}, map[string][2]float64{}, map[string][2]float64{}
 	err = load(dataDir(), from, to, func(r Record) {
 		switch r.Type {
@@ -348,7 +354,10 @@ func cmdRange(w io.Writer, args []string) error {
 			for _, p := range r.Mem {
 				mem[p.Name] = max(mem[p.Name], p.MB)
 			}
-			for _, p := range append(append([]proc{}, r.Services...), r.Desktop...) {
+			for _, p := range append(append(append([]proc{}, r.Services...), r.Desktop...), r.System...) {
+				k := peaks[p.Name]
+				peaks[p.Name] = proc{CPU: max(k.CPU, p.CPU), VRAM: max(k.VRAM, p.VRAM), Read: max(k.Read, p.Read), Write: max(k.Write, p.Write),
+					StallCPU: max(k.StallCPU, p.StallCPU), StallMem: max(k.StallMem, p.StallMem), StallIO: max(k.StallIO, p.StallIO)}
 				old, seen := svcs[p.Name]
 				if !seen {
 					old[0] = p.MB
@@ -402,7 +411,11 @@ func cmdRange(w io.Writer, args []string) error {
 		fmt.Fprintln(w, "Largest processes (peak):", names(mem, " MB"))
 	}
 	for _, n := range sortedKeys(svcs) {
-		fmt.Fprintf(w, "Service %s: RAM %.0f -> %.0f MB\n", n, svcs[n][0], svcs[n][1])
+		x := peaks[n].extras()
+		if x != "" {
+			x = "; peak" + x
+		}
+		fmt.Fprintf(w, "Service %s: RAM %.0f -> %.0f MB%s\n", n, svcs[n][0], svcs[n][1], x)
 	}
 	for _, n := range sortedKeys(watch) {
 		fmt.Fprintf(w, "Watched %s: RAM %.0f -> %.0f MB\n", n, watch[n][0], watch[n][1])
@@ -681,41 +694,114 @@ func cmdBrief(w io.Writer) error {
 		fmt.Fprintln(w, "azor: live data is stale")
 		return nil
 	}
-	var v []string
-	for _, k := range []string{"cpu", "cpu_temp", "mem", "gpu", "gpu_temp", "gpu_power", "disk_temp"} {
-		if x, ok := s.Values[k]; ok {
-			l, u := label(k)
-			v = append(v, fmt.Sprintf("%s %.0f%s", l, x, u))
+	fmt.Fprintln(w, brief(s, time.Now(), func(now time.Time, fn func(Record)) {
+		load(dataDir(), now.Add(-24*time.Hour), now, fn)
+	}))
+	return nil
+}
+
+// brief puts problems first, then the newest changes with time and value.
+func brief(s State, now time.Time, events func(time.Time, func(Record))) string {
+	var parts []string
+	for _, k := range s.Alerts {
+		l, u := label(k)
+		t := "ALERT " + l
+		if v, ok := s.Values[k]; ok {
+			t += fmt.Sprintf(" %.0f%s", v, u)
 		}
+		parts = append(parts, t)
 	}
-	out := "azor: " + strings.Join(v, ", ")
-	if len(s.Alerts) > 0 {
-		out += "; ACTIVE ALERTS: " + strings.Join(s.Alerts, ", ")
+	for _, p := range s.Problems {
+		parts = append(parts, "ATTENTION "+p)
 	}
-	if len(s.Failed) > 0 {
-		out += fmt.Sprintf("; failed services: %d", len(s.Failed))
-	}
-	if len(s.Problems) > 0 {
-		out += "; ATTENTION: " + strings.Join(s.Problems, "; ")
+	if n := len(s.Failed); n > 0 {
+		t := "FAILED SERVICES " + strings.Join(s.Failed[:min(n, 4)], ", ")
+		if n > 4 {
+			t += fmt.Sprintf(" and %d more", n-4)
+		}
+		parts = append(parts, t)
 	}
 	if f := failedTimers(s.Timers); len(f) > 0 {
-		out += "; FAILED TIMERS: " + strings.Join(f, ", ")
+		parts = append(parts, "FAILED TIMERS "+strings.Join(f, ", "))
 	}
-	n := map[string]float64{}
-	now := time.Now()
-	load(dataDir(), now.Add(-24*time.Hour), now, func(r Record) {
-		if r.Type == "event" && r.Kind != "start" && r.Kind != "clear" {
-			n[r.Kind+" "+r.Key]++
+	if len(parts) == 0 {
+		parts = []string{"no problems now"}
+	}
+	last, count := map[string]Record{}, map[string]int{}
+	events(now, func(r Record) {
+		if r.Type != "event" || r.Kind == "start" || r.Kind == "clear" {
+			return
 		}
+		k := r.Kind + " " + r.Key
+		if old, ok := last[k]; ok {
+			r.Old = old.Old // from the first to the latest value
+		}
+		last[k] = r
+		count[k]++
 	})
-	if len(n) > 0 {
-		out += "; last 24h: " + names(n, "x")
+	keys := sortedKeys(last)
+	sort.SliceStable(keys, func(a, b int) bool { return last[keys[a]].T > last[keys[b]].T })
+	var changes []string
+	for _, k := range keys {
+		if t := briefEvent(last[k], now); t != "" {
+			if count[k] > 1 {
+				t += fmt.Sprintf(" (%dx)", count[k])
+			}
+			changes = append(changes, t)
+		}
 	}
-	if r := []rune(out); len(r) > briefMax {
-		out = string(r[:briefMax-3]) + "..."
+	out := cleanTo("azor: "+strings.Join(parts, "; "), briefMax)
+	for i, t := range changes {
+		sep := "; "
+		if i == 0 {
+			sep = ". Last 24h, newest first: "
+		}
+		more := fmt.Sprintf("; +%d more (azor events 24h)", len(changes)-i)
+		if len([]rune(out+sep+t)) > briefMax-len(more) {
+			if len([]rune(out+more)) <= briefMax {
+				out += more
+			}
+			break
+		}
+		out += sep + t
 	}
-	fmt.Fprintln(w, out)
-	return nil
+	return out
+}
+
+func briefEvent(r Record, now time.Time) string {
+	t := time.Unix(r.T, 0)
+	at := t.Format("15:04")
+	if t.YearDay() != now.YearDay() {
+		at = t.Format("01-02 15:04")
+	}
+	cut := func(s string) string {
+		if c := []rune(s); len(c) > 40 {
+			return string(c[:37]) + "..."
+		}
+		return orNone(s)
+	}
+	switch r.Kind {
+	case "fact", "timer", "watched", "health":
+		if r.Old == r.New || orNone(r.Old) == orNone(r.New) || (r.Kind == "timer" && r.Old == "" && !strings.HasPrefix(r.New, "failed")) {
+			return "" // back to what it was
+		}
+		return fmt.Sprintf("%s %s %s -> %s", at, r.Key, cut(r.Old), cut(r.New))
+	case "alert":
+		l, u := label(r.Key)
+		return fmt.Sprintf("%s alert %s %.0f%s", at, l, r.Val, u)
+	case "gap":
+		return fmt.Sprintf("%s no data for %s before", at, time.Duration(r.Secs)*time.Second)
+	case "unit":
+		if r.New == "" {
+			return at + " " + r.Key + " recovered"
+		}
+		return at + " " + r.Key + " FAILED"
+	case "desktop":
+		return fmt.Sprintf("%s %s %s", at, r.Key, cut(r.New))
+	case "package":
+		return fmt.Sprintf("%s packages %s", at, cut(r.Key))
+	}
+	return fmt.Sprintf("%s %s %s", at, r.Kind, cut(r.Key)) // config, file
 }
 
 // cmdFiles shows which configuration files detection selects now.

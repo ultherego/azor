@@ -24,6 +24,7 @@ type Record struct {
 	Watch    []proc             `json:"watch,omitempty"`
 	Desktop  []proc             `json:"desktop,omitempty"`
 	Services []proc             `json:"services,omitempty"`
+	System   []proc             `json:"system,omitempty"`
 	Facts    map[string]string  `json:"facts,omitempty"`
 	Old      string             `json:"old,omitempty"`
 	New      string             `json:"new,omitempty"`

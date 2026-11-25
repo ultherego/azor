@@ -250,16 +250,11 @@ func (d *desktop) scan(seconds float64) (out []proc) {
 	}
 	cur := map[string]float64{}
 	add := func(dir, name string) {
-		mem, ok := readNum(dir + "/memory.current")
+		p, ok := measure(dir, seconds, d.prevCPU, cur, nil)
 		if !ok {
 			return
 		}
-		p := proc{Name: name, MB: round1(mem / (1 << 20))}
-		u := cgroupUsec(dir)
-		if old, seen := d.prevCPU[dir]; seen && u >= old && seconds > 0 {
-			p.CPU = round1((u - old) / seconds / 1e4)
-		}
-		cur[dir] = u
+		p.Name = name
 		if p.MB >= 5 || p.CPU >= 0.5 || dir == ownerCg {
 			out = append(out, p)
 		}

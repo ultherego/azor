@@ -794,3 +794,72 @@ func TestLongBackupSection(t *testing.T) {
 		t.Fatal(n)
 	}
 }
+
+func TestMeasureCgroup(t *testing.T) {
+	r := t.TempDir()
+	set := func(cpu, io, stall string) {
+		put(t, r, map[string]string{"a.service/memory.current": "10485760", "a.service/cpu.stat": "usage_usec " + cpu,
+			"a.service/dmem.current": "drm/x/vram 104857600\ndrm/x/gtt 5", "a.service/io.pressure": "some avg10=0 total=" + stall + "\nfull avg10=0 total=9",
+			"a.service/io.stat": "9:1 rbytes=" + io + " wbytes=0\n9:2 rbytes=" + io + " wbytes=0"})
+	}
+	disks := map[string]bool{"9:1": true} // 9:2 is a layer above
+	set("0", "0", "0")
+	prev, cur := map[string]float64{}, map[string]float64{}
+	measure(r+"/a.service", 10, prev, cur, disks)
+	set("1000000", "20000000", "5000000")
+	p, ok := measure(r+"/a.service", 10, cur, map[string]float64{}, disks)
+	if !ok || p.MB != 10 || p.CPU != 10 || p.VRAM != 100 || p.Read != 2 || p.StallIO != 50 || p.StallCPU != 0 {
+		t.Fatalf("%+v", p)
+	}
+	if _, ok := measure(r+"/none", 10, prev, cur, disks); ok {
+		t.Fatal("missing group measured")
+	}
+	all := []proc{{Name: "a", MB: 9}, {Name: "b", MB: 8}, {Name: "c", MB: 1, StallIO: 50}, {Name: "d"}}
+	if n := notable(all, 1); len(n) != 2 || n[1].Name != "c" {
+		t.Fatal(n)
+	}
+}
+
+func TestDiskLabelSurvivesRenumbering(t *testing.T) {
+	for _, n := range []string{"nvme3", "nvme4"} {
+		r := t.TempDir()
+		put(t, r, map[string]string{"sys/block/" + n + "n1/device/model": "Alpha  1", "sys/block/sdx/device/model": "Twin", "sys/block/sdy/device/model": "Twin"})
+		s := newSensors(defaults(), r)
+		now := time.Now()
+		if s.diskLabel(n+"n1", now) != "Alpha 1" || s.diskLabel(n, now) != "Alpha 1" || s.diskLabel("sdx", now) != "sdx" {
+			t.Fatal(s.labels)
+		}
+	}
+	if d := describe("disk.Alpha 1.5.temp"); d.label != "Alpha 1.5 temp" || d.unit != "C" {
+		t.Fatal(d)
+	}
+}
+
+func TestBriefOrderAndLimit(t *testing.T) {
+	now := time.Date(2026, 1, 2, 15, 0, 0, 0, time.Local)
+	ev := []Record{{Type: "event", Kind: "config", Key: "old", T: now.Add(-20 * time.Hour).Unix()},
+		{Type: "event", Kind: "fact", Key: "kernel", Old: "1", New: "2", T: now.Add(-2 * time.Hour).Unix()},
+		{Type: "event", Kind: "fact", Key: "kernel", Old: "2", New: "3", T: now.Add(-time.Hour).Unix()},
+		{Type: "event", Kind: "start", T: now.Unix()},
+		{Type: "event", Kind: "fact", Key: "x", Old: "a", New: "b", T: now.Add(-9 * time.Minute).Unix()},
+		{Type: "event", Kind: "fact", Key: "x", Old: "b", New: "a", T: now.Add(-8 * time.Minute).Unix()}}
+	each := func(_ time.Time, fn func(Record)) {
+		for _, r := range ev {
+			fn(r)
+		}
+	}
+	got := brief(State{Problems: []string{"P"}}, now, each)
+	if got != "azor: ATTENTION P. Last 24h, newest first: 14:00 kernel 1 -> 3 (2x); 01-01 19:00 config old" {
+		t.Fatal(got)
+	}
+	if got := brief(State{}, now, func(time.Time, func(Record)) {}); got != "azor: no problems now" {
+		t.Fatal(got)
+	}
+	for i := 0; i < 200; i++ {
+		ev = append(ev, Record{Type: "event", Kind: "config", Key: fmt.Sprint("program-", i), T: now.Unix()})
+	}
+	got = brief(State{}, now, each)
+	if len([]rune(got)) > briefMax || !strings.Contains(got, "more (azor events 24h)") {
+		t.Fatal(len(got), got)
+	}
+}

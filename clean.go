@@ -53,14 +53,14 @@ func cleanFacts(m map[string]string) map[string]string {
 
 func (r *Record) clean() {
 	r.Kind, r.Key, r.Old, r.New = clean(r.Kind), clean(r.Key), clean(r.Old), clean(r.New)
-	for _, l := range [][]proc{r.CPU, r.Mem, r.Watch, r.Services, r.Desktop} {
+	for _, l := range [][]proc{r.CPU, r.Mem, r.Watch, r.Services, r.Desktop, r.System} {
 		cleanProcs(l)
 	}
 	r.Avg, r.Max, r.Facts = cleanKeys(r.Avg), cleanKeys(r.Max), cleanFacts(r.Facts)
 }
 
 func (s *State) clean() {
-	for _, l := range [][]proc{s.CPU, s.Mem, s.Watch, s.Services, s.Desktop} {
+	for _, l := range [][]proc{s.CPU, s.Mem, s.Watch, s.Services, s.Desktop, s.System} {
 		cleanProcs(l)
 	}
 	for i := range s.Failed {

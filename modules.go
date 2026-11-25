@@ -86,6 +86,36 @@ func (s *sensors) readNet(m map[string]float64, now time.Time) {
 
 var wholeDisk = regexp.MustCompile(`^(sd[a-z]+|nvme\d+n\d+|vd[a-z]+|mmcblk\d+)$`)
 
+// diskLabel names a disk by its model, because numbers may change at boot.
+// Disks of the same model keep the kernel's name.
+func (s *sensors) diskLabel(dev string, now time.Time) string {
+	if now.Sub(s.labelsAt) > time.Minute || s.labels == nil {
+		s.labelsAt, s.labels = now, map[string]string{}
+		count, model := map[string]int{}, map[string]string{}
+		for _, b := range s.glob("/sys/block/*/device/model") {
+			d := filepath.Base(filepath.Dir(filepath.Dir(b)))
+			if m := strings.Join(strings.Fields(readStr(b)), " "); m != "" && wholeDisk.MatchString(d) {
+				model[d] = clean(m)
+				count[m]++
+			}
+		}
+		for d, m := range model {
+			if count[m] == 1 {
+				s.labels[d] = m
+				if c := nvmeCtl.FindString(d); c != "" {
+					s.labels[c] = m // the temperature belongs to the controller
+				}
+			}
+		}
+	}
+	if l := s.labels[dev]; l != "" {
+		return l
+	}
+	return dev
+}
+
+var nvmeCtl = regexp.MustCompile(`^nvme\d+`)
+
 func (s *sensors) readDisks(m map[string]float64, now time.Time) {
 	for _, l := range strings.Split(readStr(s.root+"/proc/diskstats"), "\n") {
 		f := strings.Fields(l)
@@ -93,20 +123,20 @@ func (s *sensors) readDisks(m map[string]float64, now time.Time) {
 			continue
 		}
 		num := func(i int) float64 { v, _ := strconv.ParseFloat(f[i], 64); return v }
-		p := "disk." + f[2] + "."
+		p, n := "disk."+f[2]+".", "disk."+s.diskLabel(f[2], now)+"."
 		if v, ok := s.rt.per(p+"r", num(5)*512, now); ok {
-			m[p+"read"] = v / 1e6
+			m[n+"read"] = v / 1e6
 		}
 		if v, ok := s.rt.per(p+"w", num(9)*512, now); ok {
-			m[p+"write"] = v / 1e6
+			m[n+"write"] = v / 1e6
 		}
 		if v, ok := s.rt.per(p+"b", num(12), now); ok { // milliseconds busy per second
-			m[p+"busy"] = min(v/10, 100)
+			m[n+"busy"] = min(v/10, 100)
 		}
 	}
 	for name, f := range s.disks {
 		if v, ok := readNum(f); ok {
-			m["disk."+name+".temp"] = v / 1000
+			m["disk."+s.diskLabel(name, now)+".temp"] = v / 1000
 			m["disk_temp"] = max(m["disk_temp"], v/1000)
 		}
 	}
