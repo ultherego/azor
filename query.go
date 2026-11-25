@@ -19,12 +19,12 @@ type metric struct{ key, group, label, unit string }
 
 var metrics = []metric{
 	{"cpu", "CPU", "load", "%"}, {"cpu_temp", "CPU", "temperature", "C"}, {"cpu_mhz", "CPU", "clock average", "MHz"}, {"cpu_mhz_top", "CPU", "clock fastest core", "MHz"}, {"load1", "CPU", "load average 1m", ""},
-	{"mem", "Memory", "RAM used", "%"}, {"swap", "Memory", "swap used", "%"},
+	{"mem", "Memory", "RAM used", "%"}, {"swap", "Memory", "swap used", "%"}, {"swap_in", "Memory", "swap read", "MB/s"}, {"swap_out", "Memory", "swap written", "MB/s"}, {"zram_data_mb", "Memory", "zram data", "MB"}, {"zram_ram_mb", "Memory", "zram RAM use", "MB"},
 	{"gpu", "GPU", "load", "%"}, {"gpu_video", "GPU", "video engine", "%"}, {"gpu_temp", "GPU", "temperature", "C"}, {"gpu_junction", "GPU", "junction", "C"}, {"gpu_mem_temp", "GPU", "memory temp", "C"},
 	{"gpu_power", "GPU", "power", "W"}, {"gpu_clock", "GPU", "core clock", "MHz"}, {"gpu_mem_clock", "GPU", "memory clock", "MHz"}, {"gpu_vram_mb", "GPU", "VRAM used", "MB"}, {"gpu_fan", "GPU", "fan", "RPM"}, {"gpu_fan_pct", "GPU", "fan", "%"},
 	{"disk_temp", "Disks", "hottest", "C"}, {"net_down", "Network", "download", "MB/s"}, {"net_up", "Network", "upload", "MB/s"},
 	{"system_fan", "System", "fastest fan", "RPM"}, {"battery", "System", "battery", "%"}, {"battery_power", "System", "battery power", "W"},
-	{"psi_cpu", "Pressure", "CPU stall", "%"}, {"psi_memory", "Pressure", "memory stall", "%"}, {"psi_io", "Pressure", "I/O stall", "%"},
+	{"psi_cpu", "Pressure", "CPU stall", "%"}, {"psi_memory", "Pressure", "memory stall", "%"}, {"psi_io", "Pressure", "I/O stall", "%"}, {"blocked", "Pressure", "blocked on I/O", "tasks"},
 }
 
 // describe also covers per-disk and per-filesystem metrics.
@@ -149,6 +149,9 @@ func cmdNow(w io.Writer) error {
 			}
 			fmt.Fprintf(w, "  %-20s %s\n", k, s.Facts[k])
 		}
+	}
+	for _, p := range s.Problems {
+		fmt.Fprintln(w, "ATTENTION:", p)
 	}
 	if f := failedTimers(s.Timers); len(f) > 0 {
 		fmt.Fprintln(w, "FAILED TIMERS:", strings.Join(f, ", "))
@@ -292,6 +295,8 @@ func eventLine(r Record) string {
 		return fmt.Sprintf("%s  timer  %s %s -> %s", at, r.Key, orNone(r.Old), orNone(r.New))
 	case "watched":
 		return fmt.Sprintf("%s  unit   %s %s -> %s", at, r.Key, orNone(r.Old), orNone(r.New))
+	case "health":
+		return fmt.Sprintf("%s  health %s: %s -> %s", at, r.Key, orNone(r.Old), orNone(r.New))
 	case "config":
 		return fmt.Sprintf("%s  config %s: %s", at, r.Key, r.New)
 	case "package":
@@ -681,6 +686,9 @@ func cmdBrief(w io.Writer) error {
 	}
 	if len(s.Failed) > 0 {
 		out += fmt.Sprintf("; failed services: %d", len(s.Failed))
+	}
+	if len(s.Problems) > 0 {
+		out += "; ATTENTION: " + strings.Join(s.Problems, "; ")
 	}
 	if f := failedTimers(s.Timers); len(f) > 0 {
 		out += "; FAILED TIMERS: " + strings.Join(f, ", ")

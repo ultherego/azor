@@ -18,6 +18,7 @@ Usage:
   azor status               daemon health and storage
   azor brief                one short line (for hooks)
   azor hardware             detected sensors and alert limits
+  azor health              detected health checks and problems
   azor timers               scheduled jobs and their last result
   azor init                 create ~/.config/azor/azor.conf
   azor files                detected configuration files
@@ -70,6 +71,8 @@ func main() {
 		err = cmdBrief(os.Stdout)
 	case "hardware":
 		err = cmdHardware(os.Stdout)
+	case "health":
+		err = cmdHealth(os.Stdout)
 	case "timers":
 		err = cmdTimers(os.Stdout)
 	case "init":

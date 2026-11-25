@@ -347,6 +347,7 @@ func (s *sensors) read() map[string]float64 {
 		if v, ok := parseMeminfo(mi, "SwapTotal:", "SwapFree:"); ok {
 			m["swap"] = v
 		}
+		s.readSwap(m, now)
 	}
 	if on("pressure") {
 		for _, k := range []string{"cpu", "memory", "io"} {

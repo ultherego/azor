@@ -558,3 +558,46 @@ func TestSourceStaysHarmless(t *testing.T) {
 		}
 	}
 }
+
+func TestHealthDetectsFirst(t *testing.T) {
+	h := newHealth(t.TempDir()) // an empty computer answers nothing
+	for _, c := range h.checks {
+		if h.found[c.name] && c.name != "clock_sync" && c.name != "power_profile" && c.name != "boot_time" {
+			t.Errorf("%s found on an empty computer", c.name)
+		}
+	}
+	r := t.TempDir()
+	put(t, r, map[string]string{"proc/sys/kernel/osrelease": "1.0", "usr/lib/modules/2.0/modules.dep": "", "proc/vmstat": "oom_kill 0",
+		"sys/bus/pci/devices/a/aer_dev_fatal": "X 0\nTOTAL_ERR_FATAL 0", "sys/class/drm/card7/device/current_link_width": "8", "sys/class/drm/card7/device/max_link_width": "16",
+		"var/lib/pacman/local/x": "", "etc/a.conf.pacnew": "", "etc/ssh/b.pacnew": "", "var/lib/systemd/coredump/core.x": "secret"})
+	h = newHealth(r)
+	now := time.Now()
+	ev, pr := h.run(now)
+	got := strings.Join(pr, "|")
+	if len(ev) != 0 || !strings.Contains(got, "REBOOT NEEDED: kernel 1.0") || !strings.Contains(got, "x8 of x16") || !strings.Contains(got, "1 .pacnew") {
+		t.Fatal(ev, pr)
+	}
+	if h.found["cpu_throttling"] || h.found["suspend_failures"] || !h.found["oom_kills"] {
+		t.Fatal(h.found)
+	}
+	put(t, r, map[string]string{"proc/vmstat": "oom_kill 2", "usr/lib/modules/1.0/modules.dep": ""})
+	ev, pr = h.run(now.Add(time.Minute))
+	if len(ev) != 2 || !strings.Contains(strings.Join(pr, "|"), "2 processes killed") || strings.Contains(strings.Join(pr, "|"), "REBOOT") {
+		t.Fatal(ev, pr)
+	}
+}
+
+func TestSwapAndTuning(t *testing.T) {
+	r := t.TempDir()
+	put(t, r, map[string]string{"proc/stat": "cpu 1 1 1 1 1 1 1 1\nprocs_blocked 3", "proc/meminfo": "MemTotal: 10 kB\nMemAvailable: 5 kB\nSwapTotal: 10 kB\nSwapFree: 5 kB",
+		"sys/block/zram0/mm_stat": "1048576 1 2097152 0", "sys/block/sdz/queue/scheduler": "none [foo] bar", "sys/kernel/mm/transparent_hugepage/enabled": "always [madvise] never"})
+	s := newSensors(defaults(), r)
+	m := s.read()
+	if m["blocked"] != 3 || m["zram_data_mb"] != 1 || m["zram_ram_mb"] != 2 {
+		t.Fatal(m)
+	}
+	f := s.facts()
+	if f["io_schedulers"] != "foo" || f["huge_pages"] != "madvise" || f["cpu_boost"] != "" {
+		t.Fatal(f)
+	}
+}

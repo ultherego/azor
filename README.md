@@ -72,6 +72,7 @@ Apply it with `systemctl --user restart azor`.
 azor                      # now
 azor range 12:00 15:00    # what happened between 12:00 and 15:00
 azor events               # alerts and changes
+azor health               # problems such as a needed reboot
 azor timers               # backups, snapshots and other scheduled jobs
 ```
 

@@ -18,7 +18,7 @@ import (
 
 // moduleNames lists everything Azor can collect. All are on by default.
 var moduleNames = []string{"cpu", "memory", "gpu", "disks", "network", "fans", "battery", "pressure",
-	"processes", "services", "timers", "filesystem", "facts", "files", "journal", "packages"}
+	"processes", "services", "timers", "filesystem", "health", "facts", "files", "journal", "packages"}
 
 // rates turns growing counters into values per second.
 type rates struct {
@@ -152,7 +152,7 @@ func (s *sensors) readBattery(m map[string]float64) {
 
 // factsVersion changes when the set of facts changes, so that an Azor upgrade
 // does not look like a change of the computer.
-const factsVersion = "5"
+const factsVersion = "6"
 
 // facts are settings and states; a change becomes an event.
 func (s *sensors) facts() map[string]string {
@@ -167,6 +167,7 @@ func (s *sensors) facts() map[string]string {
 	}
 	put("facts_version", factsVersion)
 	s.inventory(put)
+	s.tuning(put)
 	if s.root == "" {
 		desktopFacts(put)
 	}

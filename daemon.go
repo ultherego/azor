@@ -150,6 +150,7 @@ type State struct {
 	Facts    map[string]string  `json:"facts,omitempty"`
 	Failed   []string           `json:"failed,omitempty"`
 	Timers   []timer            `json:"timers,omitempty"`
+	Problems []string           `json:"problems,omitempty"`
 }
 
 func runDaemon() error {
@@ -228,7 +229,18 @@ func runDaemon() error {
 		}
 	}
 	var timersAt time.Time
+	var hl *health
+	if cfg.on("health") {
+		hl = newHealth("")
+	}
 	slow := func(t time.Time) {
+		if hl != nil {
+			var es []Record
+			es, st.Problems = hl.run(t)
+			for _, e := range es {
+				store(e)
+			}
+		}
 		if cfg.on("timers") && time.Since(timersAt) >= 5*time.Minute {
 			timersAt = time.Now()
 			if ts, ok := readTimers(cfg.IgnoreTimers); ok {
