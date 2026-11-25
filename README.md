@@ -6,7 +6,11 @@
 
 <p><b>A Claude Code hook that knows what your computer has been doing</b></p>
 
-<p>For Arch Linux and CachyOS</p>
+<p>
+<a href="https://archlinux.org"><img src="assets/archlinux.svg" alt="Arch Linux" title="Arch Linux" height="40"></a>
+&nbsp;&nbsp;&nbsp;
+<a href="https://cachyos.org"><img src="assets/cachyos.svg" alt="CachyOS" title="CachyOS" height="40"></a>
+</p>
 
 </div>
 
