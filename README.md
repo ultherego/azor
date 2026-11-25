@@ -4,11 +4,13 @@
 
 <h1>Azor</h1>
 
-<p><b>A small desktop telemetry recorder for Arch Linux and CachyOS</b></p>
+<p><b>A Claude Code hook that knows what your computer has been doing</b></p>
+
+<p>For Arch Linux and CachyOS</p>
 
 </div>
 
-Azor remembers how your computer was doing – load, temperatures, disks, services, configuration and package changes – so you can ask later what happened. Hardware is detected automatically. No root, no network.
+Azor is a hook for Claude Code, backed by a small telemetry daemon. The daemon records load, temperatures, disks, services, configuration and package changes, also while Claude is closed. The hook gives Claude a one-line summary when a session starts, and a skill lets it look up the history when you ask what happened. Hardware is detected automatically. No root; Azor itself makes no network connections, but what the hook prints becomes part of your Claude conversation.
 
 ## Installation
 
@@ -27,4 +29,4 @@ Or without root, from the project directory:
 make install
 ```
 
-Then run `azor help`.
+Then connect it to Claude Code as described in [claude/README.md](claude/README.md).

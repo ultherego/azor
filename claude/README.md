@@ -1,10 +1,13 @@
-# Claude Code integration
+# Connecting Azor to Claude Code
+
+Run these from this directory.
 
 Skill (Claude queries history when it is relevant):
 
+    mkdir -p ~/.claude/skills
     ln -s "$PWD/azor" ~/.claude/skills/azor
 
-Optional hook (one line of current state when a session starts). Merge into `~/.claude/settings.json`:
+Hook (one line of current state when a session starts). Merge into `~/.claude/settings.json`:
 
 ```json
 {
