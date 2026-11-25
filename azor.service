@@ -1,0 +1,16 @@
+[Unit]
+Description=Azor desktop telemetry recorder
+
+[Service]
+ExecStart=@BIN@ daemon
+Restart=on-failure
+RestartSec=10
+Nice=10
+IOSchedulingClass=idle
+CPUQuota=5%
+MemoryMax=48M
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,35 @@
+# Builds the package from this checkout:  cd packaging/local && makepkg -si
+pkgname=azor
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Small desktop telemetry recorder'
+arch=('x86_64' 'aarch64')
+license=('MIT')
+depends=('systemd')
+makedepends=('go')
+optdepends=('nvidia-utils: NVIDIA GPU metrics'
+            'hwdata: readable GPU names')
+backup=('etc/azor/azor.conf')
+options=('!debug')
+
+prepare() {
+  rm -rf "$srcdir/azor"
+  mkdir -p "$srcdir/azor"
+  cd "$startdir/../.."
+  cp -r ./*.go go.mod Makefile README.md LICENSE azor.conf azor.service claude "$srcdir/azor/"
+}
+build() {
+  cd "$srcdir/azor"
+  export GOTOOLCHAIN=local GOFLAGS=-mod=readonly
+  make build
+}
+check() {
+  cd "$srcdir/azor"
+  export GOTOOLCHAIN=local GOFLAGS=-mod=readonly
+  make test
+}
+package() {
+  cd "$srcdir/azor"
+  make install-system DESTDIR="$pkgdir"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

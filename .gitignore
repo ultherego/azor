@@ -1,0 +1,5 @@
+/azor
+*.pkg.tar*
+/packaging/*/src/
+/packaging/*/pkg/
+/packaging/*/azor-*.tar.gz
