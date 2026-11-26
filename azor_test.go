@@ -1108,7 +1108,7 @@ func TestBriefStaysShort(t *testing.T) {
 	st := State{Timers: ts, Unknown: []string{"system services", "user timers"}, Problems: []string{strings.Repeat("problem ", 30)},
 		Failed: []string{strings.Repeat("s", 70) + ".service", strings.Repeat("t", 70) + ".service", strings.Repeat("u", 70) + ".service", strings.Repeat("v", 70) + ".service", "x.service"}}
 	got := brief(st, time.Now(), func(_ time.Time, fn func(Record)) error {
-		fn(Record{Type: "event", Kind: "config", Key: "niri", T: time.Now().Unix()})
+		fn(Record{Type: "event", Kind: "config", Key: "example", T: time.Now().Unix()})
 		return nil
 	})
 	if n := len([]rune(got)); n > briefMax {
