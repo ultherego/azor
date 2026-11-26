@@ -24,10 +24,12 @@ type timer struct {
 	Next   int64  `json:"next,omitempty"`
 	Result string `json:"result,omitempty"`
 	Dur    int64  `json:"dur,omitempty"` // seconds of the last run
+	// Stale: the result could not be read now; this is the last known one.
+	Stale bool `json:"stale,omitempty"`
 }
 
 func (t timer) failed() bool {
-	return t.Last > 0 && t.Result != "" && t.Result != "success" && t.Result != "running" && t.Result != "unknown"
+	return t.Last > 0 && t.Result != "" && t.Result != "success" && t.Result != "running" && t.Result != "unknown" && t.Result != "unavailable"
 }
 
 func systemctl(args ...string) ([]byte, bool) {
@@ -90,7 +92,9 @@ func result(m map[string]string) string {
 	return m["Result"]
 }
 
-func readTimers(ignore []string) (out []timer, ok bool) {
+// A scope that cannot be listed is named in unknown; a result that cannot be
+// read is "unavailable".
+func readTimers(ignore []string) (out []timer, ok bool, unknown []string) {
 	skip := map[string]bool{}
 	for _, n := range ignore {
 		skip[strings.TrimSuffix(n, ".timer")] = true
@@ -102,6 +106,7 @@ func readTimers(ignore []string) (out []timer, ok bool) {
 		}
 		b, good := systemctl(scope, "list-timers", "--all", "--no-pager", "-o", "json")
 		if !good {
+			unknown = append(unknown, strings.TrimPrefix(scope, "--")+" timers")
 			continue
 		}
 		ok = true
@@ -116,11 +121,14 @@ func readTimers(ignore []string) (out []timer, ok bool) {
 		if len(units) == 0 {
 			continue
 		}
-		b, _ = systemctl(append([]string{scope, "show", "--no-pager", "--timestamp=unix", "-p", "Id,Result,ActiveState,ExecMainStartTimestamp,ExecMainExitTimestamp", "--"}, units...)...)
+		b, shown := systemctl(append([]string{scope, "show", "--no-pager", "--timestamp=unix", "-p", "Id,Result,ActiveState,ExecMainStartTimestamp,ExecMainExitTimestamp", "--"}, units...)...)
 		info := parseShow(string(b))
 		for _, t := range ts {
 			m := info[t.Unit]
 			t.Result = result(m)
+			if !shown {
+				t.Result = "unavailable"
+			}
 			var a, z int64
 			fmt.Sscanf(m["ExecMainStartTimestamp"], "@%d", &a)
 			fmt.Sscanf(m["ExecMainExitTimestamp"], "@%d", &z)
@@ -134,11 +142,50 @@ func readTimers(ignore []string) (out []timer, ok bool) {
 	return
 }
 
+// mergeTimers keeps what was known before for what cannot be read now: the
+// timers of a scope that did not answer and results that could not be read.
+func mergeTimers(prev, now []timer, unknown []string) (out []timer) {
+	old := map[string]timer{}
+	for _, t := range prev {
+		old[fmt.Sprint(t.User, t.Name)] = t
+	}
+	gone := map[bool]bool{}
+	for _, u := range unknown {
+		gone[strings.HasPrefix(u, "user")] = true
+	}
+	for _, t := range now {
+		if t.Result == "unavailable" {
+			if p, ok := old[fmt.Sprint(t.User, t.Name)]; ok && p.Result != "" && p.Result != "unavailable" {
+				t.Result, t.Stale = p.Result, true
+			}
+		}
+		out = append(out, t)
+	}
+	for _, t := range prev {
+		if gone[t.User] {
+			t.Stale = true
+			out = append(out, t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return
+}
+
+// unsure lists timers whose result is not known now.
+func unsure(ts []timer) (out []string) {
+	for _, t := range ts {
+		if t.Stale || t.Result == "unavailable" {
+			out = append(out, t.Name)
+		}
+	}
+	return
+}
+
 // timerStates keeps only good and bad, so that normal runs are not events.
 func timerStates(ts []timer) map[string]string {
 	out := map[string]string{}
 	for _, t := range ts {
-		if t.Result == "running" || t.Result == "unknown" || t.Result == "" || t.Last == 0 {
+		if t.Result == "running" || t.Result == "unknown" || t.Result == "unavailable" || t.Result == "" || t.Last == 0 || t.Stale {
 			continue
 		}
 		k := t.Name
@@ -155,14 +202,15 @@ func timerStates(ts []timer) map[string]string {
 
 // watchedUnits returns the state of units declared by the user; a unit is
 // looked up in the system first, then in the user session.
-func watchedUnits(names []string) map[string]string {
+func watchedUnits(names []string) (out map[string]string, complete bool) {
 	if len(names) == 0 {
-		return nil
+		return nil, true
 	}
-	out := map[string]string{}
+	out, complete = map[string]string{}, true
 	for _, scope := range []string{"--user", "--system"} {
 		b, ok := systemctl(append([]string{scope, "show", "--no-pager", "-p", "Id,LoadState,ActiveState,Result", "--"}, names...)...)
 		if !ok {
+			complete = false
 			continue
 		}
 		for id, m := range parseShow(string(b)) {
@@ -175,7 +223,7 @@ func watchedUnits(names []string) map[string]string {
 			}
 		}
 	}
-	return out
+	return
 }
 
 // stableName describes a partition by the model of its disk, because the
@@ -246,9 +294,12 @@ func (s *sensors) fsFacts(put func(k, v string)) {
 
 func cmdTimers(w io.Writer) error {
 	cfg, _ := loadConfig()
-	ts, ok := readTimers(cfg.IgnoreTimers)
+	ts, ok, unk := readTimers(cfg.IgnoreTimers)
 	if !ok {
 		return fmt.Errorf("systemd timers are not available")
+	}
+	for _, u := range unk {
+		fmt.Fprintln(w, "UNKNOWN:", u, "could not be read")
 	}
 	at := func(t int64) string {
 		if t == 0 {
@@ -267,6 +318,9 @@ func cmdTimers(w io.Writer) error {
 		}
 		if t.Result == "unknown" {
 			res = "unknown (not run since boot)"
+		}
+		if t.Result == "unavailable" {
+			res = "UNKNOWN: could not be read"
 		}
 		if t.failed() {
 			res = "FAILED: " + res

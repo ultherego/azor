@@ -180,7 +180,7 @@ func (c *Config) set(k, v string) bool {
 	if !ok {
 		return false
 	}
-	known := false
+	known := key == "disk_temp" // an absolute limit for the hottest disk, instead of disk_over
 	for _, r := range makeRules(defaults(), nil) {
 		known = known || r.Key == key
 	}

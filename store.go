@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -61,7 +62,16 @@ func appendRecord(dir string, r Record) error {
 
 // dayFiles lists only files Azor created itself, oldest first.
 func dayFiles(dir string) []string {
-	es, _ := os.ReadDir(dir)
+	out, _ := listDays(dir)
+	return out
+}
+
+// listDays reports a directory that exists but cannot be listed.
+func listDays(dir string) ([]string, error) {
+	es, err := os.ReadDir(dir)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
 	var out []string
 	for _, e := range es {
 		if e.Type().IsRegular() && dayFile.MatchString(e.Name()) {
@@ -69,7 +79,7 @@ func dayFiles(dir string) []string {
 		}
 	}
 	sort.Strings(out)
-	return out
+	return out, nil
 }
 
 // prune removes day files older than the retention; nothing else is touched.
@@ -86,7 +96,11 @@ func prune(dir string, now time.Time, days int) {
 // a power cut) and newer schemas are skipped.
 func load(dir string, from, to time.Time, fn func(Record)) error {
 	lo, hi := from.Format("2006-01-02")+".jsonl", to.Format("2006-01-02")+".jsonl"
-	for _, n := range dayFiles(dir) {
+	days, err := listDays(dir)
+	if err != nil {
+		return fmt.Errorf("history unreadable: %w", err)
+	}
+	for _, n := range days {
 		if n < lo || n > hi {
 			continue
 		}

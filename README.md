@@ -61,6 +61,10 @@ alert.cpu_temp = 85
 
 Apply it with `systemctl --user restart azor`.
 
+## Security
+
+See [SECURITY.md](SECURITY.md): what Azor never reads, how names are made safe for Claude, and how to report a problem.
+
 ## How it works
 
 1. **Record** – a small background service reads the sensors every 2 seconds and stores the average and the peak every 10 seconds.

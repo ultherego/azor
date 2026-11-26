@@ -167,6 +167,17 @@ type State struct {
 	Desktop    []proc   `json:"desktop,omitempty"`
 }
 
+// factModules names the modules that decide which facts exist.
+func factModules(c Config) string {
+	var on []string
+	for _, m := range []string{"facts", "filesystem", "desktop", "gpu"} {
+		if c.on(m) {
+			on = append(on, m)
+		}
+	}
+	return strings.Join(on, ",")
+}
+
 func runDaemon() error {
 	syscall.Umask(0o077)
 	debug.SetGCPercent(25) // little garbage; memory matters more than CPU here
@@ -196,25 +207,39 @@ func runDaemon() error {
 
 	var st State
 	var lastSaved int64
+	// The time from which writing fails is also kept outside the history,
+	// so that a restart does not forget it.
+	marker := filepath.Join(filepath.Dir(stateFile()), "write_failed")
+	if b, err := os.ReadFile(marker); err == nil {
+		fmt.Sscan(string(b), &st.WriteSince)
+		st.WriteError = "writing failed before the last start"
+	}
 	store := func(r Record) {
 		if err := appendRecord(dir, r); err != nil {
 			if st.WriteSince == 0 {
 				st.WriteSince = r.T
 				fmt.Fprintln(os.Stderr, "azor: write:", err)
+				os.WriteFile(marker, []byte(fmt.Sprint(r.T)), 0o600)
 			}
 			st.WriteError = err.Error()
 			return
 		}
 		if st.WriteSince != 0 { // the time in between is missing from the history
-			lost := Record{T: r.T, Type: "event", Kind: "lost", Secs: r.T - max(lastSaved, st.WriteSince-1)}
-			st.WriteSince, st.WriteError = 0, ""
-			appendRecord(dir, lost)
+			from := st.WriteSince - 1
+			if lastSaved > from {
+				from = lastSaved
+			}
+			if appendRecord(dir, Record{T: r.T, Type: "event", Kind: "lost", Secs: max(1, r.T-from)}) == nil {
+				st.WriteSince, st.WriteError = 0, ""
+				os.Remove(marker)
+			}
 		}
 		lastSaved = r.T
 	}
 	now := time.Now()
 	prune(dir, now, cfg.Retention)
 	last := lastSample(dir, now)
+	lastSaved = last
 	if last > 0 && now.Unix()-last > int64(gapAfter.Seconds()) {
 		store(Record{T: now.Unix(), Type: "event", Kind: "gap", Secs: now.Unix() - last})
 	}
@@ -253,6 +278,7 @@ func runDaemon() error {
 	}
 	var timersAt time.Time
 	units := map[string]map[string]string{}
+	var unknownTimers, unknownUnits []string
 	desktopAt := now
 	var hl *health
 	var dt *desktop
@@ -272,7 +298,10 @@ func runDaemon() error {
 		}
 		if cfg.on("timers") && time.Since(timersAt) >= 5*time.Minute {
 			timersAt = time.Now()
-			if ts, ok := readTimers(cfg.IgnoreTimers); ok {
+			ts, ok, unk := readTimers(cfg.IgnoreTimers)
+			unknownTimers = unk
+			if ok || len(st.Timers) > 0 {
+				ts = mergeTimers(st.Timers, ts, unk)
 				st.Timers = ts
 				// A result is kept until the next known one, also over a reboot.
 				cur := timerStates(ts)
@@ -284,9 +313,17 @@ func runDaemon() error {
 				change("timer", cur, t)
 			}
 		}
-		if u := watchedUnits(cfg.WatchUnits); u != nil {
+		if u, complete := watchedUnits(cfg.WatchUnits); u != nil {
+			if !complete { // a unit that could not be read keeps its last state
+				for k, v := range seen["watched"] {
+					if _, ok := u[k]; !ok {
+						u[k] = v
+					}
+				}
+			}
 			change("watched", u, t)
 		}
+		st.Unknown = append(append([]string{}, unknownUnits...), unknownTimers...)
 		if cfg.on("facts") || dt != nil || cfg.on("filesystem") {
 			if cfg.on("facts") {
 				st.Facts = s.facts()
@@ -300,6 +337,7 @@ func runDaemon() error {
 					})
 				}
 			}
+			st.Facts["facts_modules"] = factModules(cfg)
 			if dt != nil {
 				dt.facts(t, func(k, v string) {
 					if v != "" {
@@ -307,7 +345,27 @@ func runDaemon() error {
 					}
 				})
 			}
-			change("fact", st.Facts, t)
+			if !cfg.on("facts") { // only what is still collected is compared
+				part := map[string]string{}
+				for k := range st.Facts {
+					if v, ok := seen["fact"][k]; ok {
+						part[k] = v
+					}
+				}
+				if _, ok := seen["fact"]; ok {
+					seen["fact"] = part
+				}
+				// nor is what the saved baseline never had: no baseline is kept here
+				cur := map[string]string{}
+				for k, v := range st.Facts {
+					if _, ok := part[k]; ok || seen["fact"] == nil {
+						cur[k] = v
+					}
+				}
+				change("fact", cur, t)
+			} else {
+				change("fact", st.Facts, t)
+			}
 			if cfg.on("facts") {
 				saveFacts(dir, st.Facts)
 			}
@@ -324,7 +382,7 @@ func runDaemon() error {
 		}
 		if cfg.on("services") {
 			var f map[string]string
-			f, st.Unknown = mergeFailed(units, failedUnits())
+			f, unknownUnits = mergeFailed(units, failedUnits())
 			st.Failed = sortedKeys(f)
 			change("unit", f, t)
 		}
@@ -351,7 +409,9 @@ func runDaemon() error {
 	}
 	// Facts survive restarts, so a new kernel or driver setting is noticed.
 	seen["fact"] = lastFacts(dir, now, cfg.Retention)
-	if seen["fact"]["facts_version"] != factsVersion {
+	// Another program version or another set of modules collects other facts:
+	// what is new or gone then is not a change of the computer.
+	if seen["fact"]["facts_version"] != factsVersion || seen["fact"]["facts_modules"] != factModules(cfg) {
 		delete(seen, "fact")
 	}
 	slow(now)
