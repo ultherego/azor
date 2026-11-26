@@ -31,7 +31,7 @@ Azor records sensor values every few seconds; its daemon works without Claude. Q
 
 - Values are averages per interval; peaks come from reads every few seconds, so shorter spikes are missed.
 - A missing metric means no readable sensor, not zero.
-- Process CPU is relative to one thread (100% = one full thread). Summed RAM of same-named processes counts shared memory more than once.
+- Process CPU is relative to one thread (100% = one full thread). Service RAM excludes file cache, which is shown apart ("+N MB file cache") and dropped by the kernel when needed; records before 2026-11-26 include it. Summed RAM of same-named processes counts shared memory more than once.
 - A check listed as not available in `azor health` was not done; it is not a pass.
 - A `desktop` event means a restart was seen; the cause is known only when the event names it. On X11 the window manager is not seen.
 - Refresh is the set mode, not the momentary rate; VRR is not known.

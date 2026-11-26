@@ -389,6 +389,7 @@ type proc struct {
 
 	// services only
 	VRAM     float64 `json:"vram,omitempty"`
+	Cache    float64 `json:"cache,omitempty"`     // MB of file copies the kernel can drop; not in MB
 	Read     float64 `json:"read,omitempty"`      // MB/s
 	Write    float64 `json:"write,omitempty"`     // MB/s
 	StallCPU float64 `json:"stall_cpu,omitempty"` // percent of time that a part was waiting

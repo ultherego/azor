@@ -424,7 +424,7 @@ func cmdRange(w io.Writer, args []string) error {
 			for _, p := range append(append(append([]proc{}, r.Services...), r.Desktop...), sys...) {
 				k := peaks[p.Name]
 				// the disk peak is the highest total of one moment, not two maxima added
-				peaks[p.Name] = proc{CPU: max(k.CPU, p.CPU), VRAM: max(k.VRAM, p.VRAM), Read: max(k.Read, p.Read+p.Write),
+				peaks[p.Name] = proc{CPU: max(k.CPU, p.CPU), VRAM: max(k.VRAM, p.VRAM), Read: max(k.Read, p.Read+p.Write), Cache: max(k.Cache, p.Cache),
 					StallCPU: max(k.StallCPU, p.StallCPU), StallMem: max(k.StallMem, p.StallMem), StallIO: max(k.StallIO, p.StallIO)}
 				old, seen := svcs[p.Name]
 				if !seen {

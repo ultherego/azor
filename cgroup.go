@@ -30,7 +30,22 @@ func measure(dir string, seconds float64, prev, cur map[string]float64, disks ma
 	if !ok {
 		return
 	}
-	p.MB = round1(mem / (1 << 20))
+	// Copies of files read or written by the group are counted there too, but
+	// the kernel drops them when memory is needed: they are kept apart.
+	cache := 0.0
+	for _, l := range strings.Split(readStr(dir+"/memory.stat"), "\n") {
+		k, v, _ := strings.Cut(l, " ")
+		n, err := strconv.ParseFloat(v, 64)
+		switch {
+		case err != nil:
+		case k == "file":
+			cache += n
+		case k == "shmem":
+			cache -= n // shared memory is not dropped
+		}
+	}
+	cache = max(0, min(cache, mem))
+	p.MB, p.Cache = round1((mem-cache)/(1<<20)), round1(cache/(1<<20))
 	rate := func(key string, v float64) float64 {
 		k := dir + "|" + key
 		cur[k] = v
@@ -101,7 +116,7 @@ func (s *svcScan) scan(root string, seconds float64) (out []proc) {
 			continue
 		}
 		o := &out[i] // several copies of one program
-		o.CPU, o.MB, o.VRAM = round1(o.CPU+p.CPU), round1(o.MB+p.MB), round1(o.VRAM+p.VRAM)
+		o.CPU, o.MB, o.VRAM, o.Cache = round1(o.CPU+p.CPU), round1(o.MB+p.MB), round1(o.VRAM+p.VRAM), round1(o.Cache+p.Cache)
 		o.Read, o.Write = round1(o.Read+p.Read), round1(o.Write+p.Write)
 		o.StallCPU, o.StallMem, o.StallIO = max(o.StallCPU, p.StallCPU), max(o.StallMem, p.StallMem), max(o.StallIO, p.StallIO)
 	}
@@ -125,6 +140,9 @@ func notable(all []proc, n int) (out []proc) {
 
 // extras describes what is not shown for every service.
 func (p proc) extras() (s string) {
+	if p.Cache >= 50 {
+		s += fmt.Sprintf("  +%.0f MB file cache", p.Cache)
+	}
 	if p.VRAM > 0 {
 		s += fmt.Sprintf("  VRAM %.0f MB", p.VRAM)
 	}

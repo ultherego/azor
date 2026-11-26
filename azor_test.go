@@ -802,7 +802,7 @@ func TestLongBackupSection(t *testing.T) {
 func TestMeasureCgroup(t *testing.T) {
 	r := t.TempDir()
 	set := func(cpu, io, stall string) {
-		put(t, r, map[string]string{"a.service/memory.current": "10485760", "a.service/cpu.stat": "usage_usec " + cpu,
+		put(t, r, map[string]string{"a.service/memory.current": "115343360", "a.service/memory.stat": "anon 5\nfile 104857600\nshmem 0\n", "a.service/cpu.stat": "usage_usec " + cpu,
 			"a.service/dmem.current": "drm/x/vram 104857600\ndrm/x/gtt 5", "a.service/io.pressure": "some avg10=0 total=" + stall + "\nfull avg10=0 total=9",
 			"a.service/io.stat": "9:1 rbytes=" + io + " wbytes=0\n9:2 rbytes=" + io + " wbytes=0"})
 	}
@@ -1132,5 +1132,17 @@ func TestTimerStatesFromHistory(t *testing.T) {
 	})
 	if m["borgmatic"] != "ok" {
 		t.Fatal(m)
+	}
+}
+
+func TestFileCacheIsApart(t *testing.T) {
+	r := t.TempDir()
+	put(t, r, map[string]string{"s.service/memory.current": "9000000000", "s.service/memory.stat": "anon 200000000\nfile 8700000000\nshmem 100000000\nkernel 1\n"})
+	p, ok := measure(r+"/s.service", 0, nil, map[string]float64{}, nil)
+	if !ok || p.MB < 380 || p.MB > 382 || p.Cache < 8200 || p.Cache > 8202 {
+		t.Fatalf("%+v", p)
+	}
+	if !strings.Contains(p.extras(), "file cache") {
+		t.Fatal(p.extras())
 	}
 }
