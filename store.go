@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -112,7 +113,19 @@ func load(dir string, from, to time.Time, fn func(Record)) error {
 	return nil
 }
 
+const factsFile = "facts.json"
+
+// saveFacts keeps the last facts apart from the day files, which expire.
+func saveFacts(dir string, f map[string]string) {
+	if len(f) > 0 {
+		writeAtomic(filepath.Join(dir, factsFile), f)
+	}
+}
+
 func lastFacts(dir string, now time.Time, days int) (f map[string]string) {
+	if b, err := os.ReadFile(filepath.Join(dir, factsFile)); err == nil && json.Unmarshal(b, &f) == nil && len(f) > 0 {
+		return f
+	}
 	load(dir, now.AddDate(0, 0, -days), now, func(r Record) {
 		switch {
 		case r.Type == "facts":
@@ -125,6 +138,29 @@ func lastFacts(dir string, now time.Time, days int) (f map[string]string) {
 			}
 		}
 	})
+	return
+}
+
+// lastSample reads only the newest day files, from the end.
+func lastSample(dir string, now time.Time) (last int64) {
+	fs := dayFiles(dir)
+	for i := len(fs) - 1; i >= 0 && i >= len(fs)-2 && last == 0; i-- {
+		f, err := os.Open(filepath.Join(dir, fs[i]))
+		if err != nil {
+			continue
+		}
+		size, _ := f.Seek(0, io.SeekEnd)
+		f.Seek(max(0, size-256<<10), io.SeekStart)
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 64<<10), 4<<20)
+		for sc.Scan() {
+			var r Record
+			if json.Unmarshal(sc.Bytes(), &r) == nil && r.Type == "sample" && r.T <= now.Unix() {
+				last = max(last, r.T)
+			}
+		}
+		f.Close()
+	}
 	return
 }
 

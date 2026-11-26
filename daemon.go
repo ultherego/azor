@@ -6,7 +6,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -29,7 +28,11 @@ func makeRules(c Config, crit map[string]float64) (out []rule) {
 			}
 			on = v
 		}
-		out = append(out, rule{key, on, on - span, hold})
+		off := on - span
+		if on > 0 && off <= 0 {
+			off = on / 2 // a low user threshold must still be able to clear
+		}
+		out = append(out, rule{key, on, off, hold})
 	}
 	temp := func(key string, fallback float64) {
 		on := fallback
@@ -42,7 +45,11 @@ func makeRules(c Config, crit map[string]float64) (out []rule) {
 	temp("gpu_temp", 90)
 	temp("gpu_junction", 100)
 	temp("gpu_mem_temp", 98)
-	temp("disk_temp", 75)
+	if _, own := c.Alerts["disk_temp"]; own {
+		temp("disk_temp", 75) // the user's absolute limit for the hottest disk
+	} else {
+		add("disk_over", 0, 7, 2) // each disk against its own limit
+	}
 	add("mem", 92, 7, 2)
 	add("psi_memory", 10, 7, 2)
 	add("psi_io", 40, 25, 3)
@@ -150,9 +157,14 @@ type State struct {
 	FS       map[string]float64 `json:"fs,omitempty"`
 	Facts    map[string]string  `json:"facts,omitempty"`
 	Failed   []string           `json:"failed,omitempty"`
-	Timers   []timer            `json:"timers,omitempty"`
-	Problems []string           `json:"problems,omitempty"`
-	Desktop  []proc             `json:"desktop,omitempty"`
+	// Sources that could not be read; what was known before is kept.
+	Unknown []string `json:"unknown,omitempty"`
+	// Set while the history cannot be written.
+	WriteError string   `json:"write_error,omitempty"`
+	WriteSince int64    `json:"write_since,omitempty"`
+	Timers     []timer  `json:"timers,omitempty"`
+	Problems   []string `json:"problems,omitempty"`
+	Desktop    []proc   `json:"desktop,omitempty"`
 }
 
 func runDaemon() error {
@@ -182,19 +194,27 @@ func runDaemon() error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 
+	var st State
+	var lastSaved int64
 	store := func(r Record) {
 		if err := appendRecord(dir, r); err != nil {
-			fmt.Fprintln(os.Stderr, "azor: write:", err)
+			if st.WriteSince == 0 {
+				st.WriteSince = r.T
+				fmt.Fprintln(os.Stderr, "azor: write:", err)
+			}
+			st.WriteError = err.Error()
+			return
 		}
+		if st.WriteSince != 0 { // the time in between is missing from the history
+			lost := Record{T: r.T, Type: "event", Kind: "lost", Secs: r.T - max(lastSaved, st.WriteSince-1)}
+			st.WriteSince, st.WriteError = 0, ""
+			appendRecord(dir, lost)
+		}
+		lastSaved = r.T
 	}
 	now := time.Now()
 	prune(dir, now, cfg.Retention)
-	var last int64
-	load(dir, now.AddDate(0, 0, -cfg.Retention), now, func(r Record) {
-		if r.Type == "sample" {
-			last = r.T
-		}
-	})
+	last := lastSample(dir, now)
 	if last > 0 && now.Unix()-last > int64(gapAfter.Seconds()) {
 		store(Record{T: now.Unix(), Type: "event", Kind: "gap", Secs: now.Unix() - last})
 	}
@@ -202,7 +222,7 @@ func runDaemon() error {
 
 	s, ps, a := newSensors(cfg, ""), &procScan{}, newAgg()
 	al := alerts{makeRules(cfg, s.crit), map[string]*alert{}}
-	st, pac, svc, sys, conf := State{}, newPacTail("/var/log/pacman.log"), &svcScan{}, &svcScan{}, newConfigScan()
+	pac, svc, sys, conf := newPacTail("/var/log/pacman.log"), &svcScan{}, &svcScan{}, newConfigScan()
 	if cfg.on("processes") {
 		_, _, st.Watch = ps.top(0, cfg.TopN, cfg.WatchProcs)
 	}
@@ -232,6 +252,7 @@ func runDaemon() error {
 		}
 	}
 	var timersAt time.Time
+	units := map[string]map[string]string{}
 	desktopAt := now
 	var hl *health
 	var dt *desktop
@@ -266,8 +287,19 @@ func runDaemon() error {
 		if u := watchedUnits(cfg.WatchUnits); u != nil {
 			change("watched", u, t)
 		}
-		if cfg.on("facts") {
-			st.Facts = s.facts()
+		if cfg.on("facts") || dt != nil || cfg.on("filesystem") {
+			if cfg.on("facts") {
+				st.Facts = s.facts()
+			} else {
+				st.Facts = map[string]string{}
+				if cfg.on("filesystem") {
+					s.fsFacts(func(k, v string) {
+						if v != "" {
+							st.Facts[k] = v
+						}
+					})
+				}
+			}
 			if dt != nil {
 				dt.facts(t, func(k, v string) {
 					if v != "" {
@@ -276,6 +308,9 @@ func runDaemon() error {
 				})
 			}
 			change("fact", st.Facts, t)
+			if cfg.on("facts") {
+				saveFacts(dir, st.Facts)
+			}
 		}
 		if dt != nil {
 			for _, e := range dt.changes(t.Unix()) {
@@ -288,12 +323,9 @@ func runDaemon() error {
 			}
 		}
 		if cfg.on("services") {
-			st.Failed = nil
-			f := failedUnits()
-			for k := range f {
-				st.Failed = append(st.Failed, k)
-			}
-			sort.Strings(st.Failed)
+			var f map[string]string
+			f, st.Unknown = mergeFailed(units, failedUnits())
+			st.Failed = sortedKeys(f)
 			change("unit", f, t)
 		}
 		if cfg.on("files") {
@@ -351,10 +383,11 @@ func runDaemon() error {
 		if now.Sub(lastFlush.Round(0)) < cfg.Interval-cfg.Sample/2 {
 			continue
 		}
+		span := now.Sub(lastFlush)
 		lastFlush = now
 		avg, max := a.result()
 		a = newAgg()
-		store(Record{T: now.Unix(), Type: "sample", Avg: avg, Max: max})
+		store(Record{T: now.Unix(), Type: "sample", Avg: avg, Max: max, Secs: int64(span.Round(time.Second).Seconds())})
 		for _, e := range al.update(now.Unix(), avg, withMax(avg, max)) {
 			store(e)
 		}
@@ -373,7 +406,7 @@ func runDaemon() error {
 				}
 				store(Record{T: now.Unix(), Type: "procs", CPU: st.CPU, Mem: st.Mem, Watch: st.Watch, Services: st.Services, System: st.System})
 			}
-			if cfg.on("disks") {
+			if cfg.on("disks") || cfg.on("filesystem") {
 				if fs := filesystems(readStr("/proc/self/mounts"), fsUsed); len(fs) > 0 {
 					for k, v := range fs {
 						fs[k] = round1(v)

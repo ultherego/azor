@@ -66,6 +66,10 @@ func (s *State) clean() {
 	for i := range s.Failed {
 		s.Failed[i] = clean(s.Failed[i])
 	}
+	s.WriteError = clean(s.WriteError)
+	for i := range s.Unknown {
+		s.Unknown[i] = clean(s.Unknown[i])
+	}
 	for i := range s.Problems {
 		s.Problems[i] = clean(s.Problems[i])
 	}

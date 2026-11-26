@@ -22,7 +22,7 @@ var metrics = []metric{
 	{"mem", "Memory", "RAM used", "%"}, {"swap", "Memory", "swap used", "%"}, {"swap_in", "Memory", "swap read", "MB/s"}, {"swap_out", "Memory", "swap written", "MB/s"}, {"zram_data_mb", "Memory", "zram data", "MB"}, {"zram_ram_mb", "Memory", "zram RAM use", "MB"},
 	{"gpu", "GPU", "load", "%"}, {"gpu_video", "GPU", "video engine", "%"}, {"gpu_temp", "GPU", "temperature", "C"}, {"gpu_junction", "GPU", "junction", "C"}, {"gpu_mem_temp", "GPU", "memory temp", "C"},
 	{"gpu_power", "GPU", "power", "W"}, {"gpu_clock", "GPU", "core clock", "MHz"}, {"gpu_mem_clock", "GPU", "memory clock", "MHz"}, {"gpu_vram_mb", "GPU", "VRAM used", "MB"}, {"gpu_fan", "GPU", "fan", "RPM"}, {"gpu_fan_pct", "GPU", "fan", "%"},
-	{"disk_temp", "Disks", "hottest", "C"}, {"net_down", "Network", "download", "MB/s"}, {"net_up", "Network", "upload", "MB/s"},
+	{"disk_temp", "Disks", "hottest", "C"}, {"disk_over", "Disks", "above own warning point", "C"}, {"net_down", "Network", "download", "MB/s"}, {"net_up", "Network", "upload", "MB/s"},
 	{"system_fan", "System", "fastest fan", "RPM"}, {"battery", "System", "battery", "%"}, {"battery_power", "System", "battery power", "W"},
 	{"psi_cpu", "Pressure", "CPU stall", "%"}, {"psi_memory", "Pressure", "memory stall", "%"}, {"psi_io", "Pressure", "I/O stall", "%"}, {"blocked", "Pressure", "blocked on I/O", "tasks"},
 }
@@ -289,6 +289,8 @@ func eventLine(r Record) string {
 		return fmt.Sprintf("%s  ALERT  %s at %.1f %s", at, l, r.Val, u)
 	case "clear":
 		return fmt.Sprintf("%s  clear  %s after %s, peak %.1f %s", at, l, time.Duration(r.Secs)*time.Second, r.Val, u)
+	case "lost":
+		return fmt.Sprintf("%s  LOST   history not written for the previous %s", at, time.Duration(r.Secs)*time.Second)
 	case "gap":
 		return fmt.Sprintf("%s  GAP    no data for the previous %s (suspended, off or daemon stopped)", at, time.Duration(r.Secs)*time.Second)
 	case "fact":
@@ -321,6 +323,52 @@ func eventLine(r Record) string {
 	return at + "  " + r.Kind
 }
 
+// cover adds up the time samples stand for. Newer samples say it; for older
+// ones it is the distance to the previous sample, unless the daemon recorded
+// a break in between. A first old sample takes the distance to the next one.
+type cover struct {
+	secs     float64
+	prev     int64
+	pending  bool
+	fallback float64
+}
+
+func (c *cover) add(r Record) {
+	switch {
+	case r.Secs > 0:
+		c.secs += float64(r.Secs)
+	case c.prev > 0 && r.T > c.prev && r.T-c.prev <= 600:
+		d := float64(r.T - c.prev)
+		if c.pending {
+			c.secs += d
+		}
+		c.secs += d
+	case c.prev == 0:
+		c.pending = true
+	default:
+		c.secs += c.fallback
+	}
+	if c.prev > 0 {
+		c.pending = false
+	}
+	c.prev = r.T
+}
+
+// cut marks a break: the next sample does not continue the previous one.
+func (c *cover) cut() {
+	if c.pending {
+		c.secs += c.fallback
+	}
+	c.prev, c.pending = 0, false
+}
+
+func (c *cover) total() float64 {
+	if c.pending {
+		return c.secs + c.fallback
+	}
+	return c.secs
+}
+
 func cmdRange(w io.Writer, args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("usage: azor range FROM TO")
@@ -335,10 +383,12 @@ func cmdRange(w io.Writer, args []string) error {
 	all, parts := newSummary(), make([]*summary, rows)
 	var events []Record
 	svcs, peaks := map[string][2]float64{}, map[string]proc{}
+	cov := &cover{fallback: cfg.Interval.Seconds()}
 	cpu, mem, watch, fs := map[string]float64{}, map[string]float64{}, map[string][2]float64{}, map[string][2]float64{}
 	err = load(dataDir(), from, to, func(r Record) {
 		switch r.Type {
 		case "sample":
+			cov.add(r)
 			all.add(r)
 			i := min(int(time.Unix(r.T, 0).Sub(from)/step), rows-1)
 			if parts[i] == nil {
@@ -347,6 +397,9 @@ func cmdRange(w io.Writer, args []string) error {
 			parts[i].add(r)
 		case "event":
 			events = append(events, r)
+			if r.Kind == "gap" || r.Kind == "start" || r.Kind == "lost" {
+				cov.cut()
+			}
 		case "procs":
 			for _, p := range r.CPU {
 				cpu[p.Name] = max(cpu[p.Name], p.CPU)
@@ -354,9 +407,15 @@ func cmdRange(w io.Writer, args []string) error {
 			for _, p := range r.Mem {
 				mem[p.Name] = max(mem[p.Name], p.MB)
 			}
-			for _, p := range append(append(append([]proc{}, r.Services...), r.Desktop...), r.System...) {
+			sys := make([]proc, len(r.System))
+			for i, p := range r.System { // a system unit is not the user unit of the same name
+				p.Name = "system " + p.Name
+				sys[i] = p
+			}
+			for _, p := range append(append(append([]proc{}, r.Services...), r.Desktop...), sys...) {
 				k := peaks[p.Name]
-				peaks[p.Name] = proc{CPU: max(k.CPU, p.CPU), VRAM: max(k.VRAM, p.VRAM), Read: max(k.Read, p.Read), Write: max(k.Write, p.Write),
+				// the disk peak is the highest total of one moment, not two maxima added
+				peaks[p.Name] = proc{CPU: max(k.CPU, p.CPU), VRAM: max(k.VRAM, p.VRAM), Read: max(k.Read, p.Read+p.Write),
 					StallCPU: max(k.StallCPU, p.StallCPU), StallMem: max(k.StallMem, p.StallMem), StallIO: max(k.StallIO, p.StallIO)}
 				old, seen := svcs[p.Name]
 				if !seen {
@@ -388,8 +447,8 @@ func cmdRange(w io.Writer, args []string) error {
 	if all.n == 0 {
 		fmt.Fprintln(w, "No samples in this range.")
 	} else {
-		cover := float64(all.n) * cfg.Interval.Seconds() / to.Sub(from).Seconds() * 100
-		fmt.Fprintf(w, "%d samples, about %.0f%% of the range covered\n", all.n, min(cover, 100))
+		pct := cov.total() / to.Sub(from).Seconds() * 100
+		fmt.Fprintf(w, "%d samples, about %.0f%% of the range covered\n", all.n, min(pct, 100))
 		all.print(w)
 		fmt.Fprintln(w, "Timeline (averages, peak in brackets):")
 		for i, p := range parts {
@@ -412,6 +471,9 @@ func cmdRange(w io.Writer, args []string) error {
 	}
 	for _, n := range sortedKeys(svcs) {
 		x := peaks[n].extras()
+		if c := peaks[n].CPU; c > 0 {
+			x = fmt.Sprintf("  CPU %.0f%%", c) + x
+		}
 		if x != "" {
 			x = "; peak" + x
 		}
@@ -496,12 +558,31 @@ func journal(w io.Writer, from, to time.Time) {
 		fmt.Fprintln(w, "Journal errors: unavailable")
 		return
 	}
-	n := map[string]float64{}
-	d := json.NewDecoder(bufio.NewReader(out))
+	n, complete := journalCount(out)
+	if c.Wait() != nil {
+		complete = false
+	}
+	if len(n) == 0 && !complete {
+		fmt.Fprintln(w, "Journal errors: unavailable")
+		return
+	}
+	note := ""
+	if !complete {
+		note = " (INCOMPLETE: reading stopped early)"
+	}
+	fmt.Fprintln(w, "Journal errors (count per unit)"+note+":", names(n, "x"))
+	if o := oldestJournal(); !o.IsZero() && from.Before(o) {
+		fmt.Fprintln(w, "  note: the journal only reaches back to", o.Format("2006-01-02 15:04"))
+	}
+}
+
+func journalCount(in io.Reader) (n map[string]float64, complete bool) {
+	n = map[string]float64{}
+	d := json.NewDecoder(bufio.NewReader(in))
 	for {
 		var e map[string]any
-		if d.Decode(&e) != nil {
-			break
+		if err := d.Decode(&e); err != nil {
+			return n, err == io.EOF
 		}
 		name := "other"
 		for _, k := range []string{"_SYSTEMD_USER_UNIT", "_SYSTEMD_UNIT", "SYSLOG_IDENTIFIER"} {
@@ -511,14 +592,6 @@ func journal(w io.Writer, from, to time.Time) {
 			}
 		}
 		n[name]++
-	}
-	if c.Wait() != nil && len(n) == 0 {
-		fmt.Fprintln(w, "Journal errors: unavailable")
-		return
-	}
-	fmt.Fprintln(w, "Journal errors (count per unit):", names(n, "x"))
-	if o := oldestJournal(); !o.IsZero() && from.Before(o) {
-		fmt.Fprintln(w, "  note: the journal only reaches back to", o.Format("2006-01-02 15:04"))
 	}
 }
 
@@ -633,6 +706,16 @@ func cmdStatus(w io.Writer) error {
 		}
 	}
 	fmt.Fprintf(w, "daemon: %s\ndata: %s, %d day files, %.1f MB, retention %d days\n", live, dataDir(), len(fs), float64(size)/1e6, cfg.Retention)
+	var st State
+	if b, err := os.ReadFile(stateFile()); err == nil && json.Unmarshal(b, &st) == nil {
+		st.clean()
+		if st.WriteSince > 0 {
+			fmt.Fprintf(w, "HISTORY NOT SAVED since %s: %s\n", time.Unix(st.WriteSince, 0).Format("2006-01-02 15:04"), st.WriteError)
+		}
+		for _, u := range st.Unknown {
+			fmt.Fprintln(w, "unknown now:", u)
+		}
+	}
 	return nil
 }
 
@@ -694,14 +777,14 @@ func cmdBrief(w io.Writer) error {
 		fmt.Fprintln(w, "azor: live data is stale")
 		return nil
 	}
-	fmt.Fprintln(w, brief(s, time.Now(), func(now time.Time, fn func(Record)) {
-		load(dataDir(), now.Add(-24*time.Hour), now, fn)
+	fmt.Fprintln(w, brief(s, time.Now(), func(now time.Time, fn func(Record)) error {
+		return load(dataDir(), now.Add(-24*time.Hour), now, fn)
 	}))
 	return nil
 }
 
 // brief puts problems first, then the newest changes with time and value.
-func brief(s State, now time.Time, events func(time.Time, func(Record))) string {
+func brief(s State, now time.Time, events func(time.Time, func(Record)) error) string {
 	var parts []string
 	for _, k := range s.Alerts {
 		l, u := label(k)
@@ -724,11 +807,17 @@ func brief(s State, now time.Time, events func(time.Time, func(Record))) string 
 	if f := failedTimers(s.Timers); len(f) > 0 {
 		parts = append(parts, "FAILED TIMERS "+strings.Join(f, ", "))
 	}
+	if s.WriteSince > 0 {
+		parts = append([]string{"HISTORY NOT SAVED since " + time.Unix(s.WriteSince, 0).Format("01-02 15:04") + " (" + s.WriteError + ")"}, parts...)
+	}
+	for _, u := range s.Unknown {
+		parts = append(parts, u+" unknown now (could not be read; last known state kept)")
+	}
 	if len(parts) == 0 {
 		parts = []string{"no problems now"}
 	}
 	last, count := map[string]Record{}, map[string]int{}
-	events(now, func(r Record) {
+	if err := events(now, func(r Record) {
 		if r.Type != "event" || r.Kind == "start" || r.Kind == "clear" {
 			return
 		}
@@ -738,7 +827,9 @@ func brief(s State, now time.Time, events func(time.Time, func(Record))) string 
 		}
 		last[k] = r
 		count[k]++
-	})
+	}); err != nil {
+		parts = append(parts, "history unreadable: "+err.Error())
+	}
 	keys := sortedKeys(last)
 	sort.SliceStable(keys, func(a, b int) bool { return last[keys[a]].T > last[keys[b]].T })
 	var changes []string
@@ -791,6 +882,8 @@ func briefEvent(r Record, now time.Time) string {
 		return fmt.Sprintf("%s alert %s %.0f%s", at, l, r.Val, u)
 	case "gap":
 		return fmt.Sprintf("%s no data for %s before", at, time.Duration(r.Secs)*time.Second)
+	case "lost":
+		return fmt.Sprintf("%s HISTORY LOST for %s before (could not write)", at, time.Duration(r.Secs)*time.Second)
 	case "unit":
 		if r.New == "" {
 			return at + " " + r.Key + " recovered"

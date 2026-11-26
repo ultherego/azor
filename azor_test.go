@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -170,7 +171,7 @@ func TestDiscoveryIsGeneric(t *testing.T) {
 	for _, x := range makeRules(defaults(), s.crit) {
 		got[x.Key] = x.On
 	}
-	if got["cpu_temp"] != 95 || got["gpu_junction"] != 110 || got["disk_temp"] != 75 {
+	if _, abs := got["disk_temp"]; got["cpu_temp"] != 95 || got["gpu_junction"] != 110 || abs || got["disk_over"] != 0 || len(got) != 8 {
 		t.Error(got)
 	}
 	put(t, r, map[string]string{"sys/class/drm/card3/device/power/runtime_status": "suspended"})
@@ -367,7 +368,10 @@ func TestLocks(t *testing.T) {
 	if got := lockHolders(readStr("/proc/locks"))[lockKey(p)]; got != os.Getpid() {
 		t.Skipf("filesystem reports another device number: %d", got)
 	}
-	l, _ := net.Listen("unix", strings.TrimSuffix(p, ".lock"))
+	l, err := net.Listen("unix", strings.TrimSuffix(p, ".lock"))
+	if err != nil {
+		t.Skip("no unix sockets here:", err)
+	}
 	defer l.Close()
 	if s := waylandServers(filepath.Dir(p)); len(s) != 1 || s[0].owner.PID != os.Getpid() {
 		t.Fatal(s)
@@ -379,7 +383,7 @@ func fakeCompositor(t *testing.T, script func(c net.Conn)) string {
 	p := filepath.Join(t.TempDir(), "w")
 	l, err := net.Listen("unix", p)
 	if err != nil {
-		t.Fatal(err)
+		t.Skip("no unix sockets here:", err)
 	}
 	t.Cleanup(func() { l.Close() })
 	go func() {
@@ -843,16 +847,17 @@ func TestBriefOrderAndLimit(t *testing.T) {
 		{Type: "event", Kind: "start", T: now.Unix()},
 		{Type: "event", Kind: "fact", Key: "x", Old: "a", New: "b", T: now.Add(-9 * time.Minute).Unix()},
 		{Type: "event", Kind: "fact", Key: "x", Old: "b", New: "a", T: now.Add(-8 * time.Minute).Unix()}}
-	each := func(_ time.Time, fn func(Record)) {
+	each := func(_ time.Time, fn func(Record)) error {
 		for _, r := range ev {
 			fn(r)
 		}
+		return nil
 	}
 	got := brief(State{Problems: []string{"P"}}, now, each)
 	if got != "azor: ATTENTION P. Last 24h, newest first: 14:00 kernel 1 -> 3 (2x); 01-01 19:00 config old" {
 		t.Fatal(got)
 	}
-	if got := brief(State{}, now, func(time.Time, func(Record)) {}); got != "azor: no problems now" {
+	if got := brief(State{}, now, func(time.Time, func(Record)) error { return nil }); got != "azor: no problems now" {
 		t.Fatal(got)
 	}
 	for i := 0; i < 200; i++ {
@@ -861,5 +866,117 @@ func TestBriefOrderAndLimit(t *testing.T) {
 	got = brief(State{}, now, each)
 	if len([]rune(got)) > briefMax || !strings.Contains(got, "more (azor events 24h)") {
 		t.Fatal(len(got), got)
+	}
+}
+
+func TestAuditFixes(t *testing.T) {
+	// a rejected line keeps the working value
+	c := defaults()
+	c.apply("watch.units = original.service\nwatch.units = new.service, -bad\nalert.psi_memory = 5", "x")
+	if len(c.WatchUnits) != 1 || c.WatchUnits[0] != "original.service" {
+		t.Fatal(c.WatchUnits)
+	}
+	// a low threshold can still clear
+	var r rule
+	for _, x := range makeRules(c, nil) {
+		if x.Key == "psi_memory" {
+			r = x
+		}
+	}
+	a := alerts{[]rule{r}, map[string]*alert{}}
+	var ev []Record
+	for i, v := range []float64{6, 6, 0, 0, 0} {
+		m := map[string]float64{"psi_memory": v}
+		ev = append(ev, a.update(int64(i), m, m)...)
+	}
+	if len(ev) != 2 || ev[1].Kind != "clear" {
+		t.Fatal(r, ev)
+	}
+	// each disk against its own limit
+	root := t.TempDir()
+	put(t, root, map[string]string{"sys/class/hwmon/hwmon1/name": "nvme", "sys/class/hwmon/hwmon1/temp1_input": "30000", "sys/class/hwmon/hwmon1/temp1_crit": "70000",
+		"sys/class/hwmon/hwmon2/name": "drivetemp", "sys/class/hwmon/hwmon2/temp1_input": "65000", "sys/class/hwmon/hwmon2/temp1_crit": "100000"})
+	s := newSensors(defaults(), root)
+	if m := s.read(); m["disk_temp"] != 65 || m["disk_over"] != -25 {
+		t.Fatal(m)
+	}
+	// btrfs counters the kernel does not vouch for
+	put(t, root, map[string]string{"sys/fs/btrfs/u/devinfo/1/error_stats": "write_errs invalid\nread_errs 0", "sys/fs/btrfs/u/devices/sdz": ""})
+	f := map[string]string{}
+	s.fsFacts(func(k, v string) { f[k] = v })
+	if f["btrfs_errors sdz"] != "unavailable" {
+		t.Fatal(f)
+	}
+	// one Intel package counted once
+	put(t, root, map[string]string{"sys/devices/system/cpu/cpu0/thermal_throttle/package_throttle_count": "8", "sys/devices/system/cpu/cpu0/topology/physical_package_id": "0",
+		"sys/devices/system/cpu/cpu1/thermal_throttle/package_throttle_count": "8", "sys/devices/system/cpu/cpu1/topology/physical_package_id": "0",
+		"sys/devices/system/cpu/cpu2/thermal_throttle/package_throttle_count": "3", "sys/devices/system/cpu/cpu2/topology/physical_package_id": "1"})
+	if n, _ := (&health{root: root}).perPackage("/sys/devices/system/cpu/cpu[0-9]*/thermal_throttle/package_throttle_count"); n != 11 {
+		t.Fatal(n)
+	}
+	// a scope that stops answering keeps its last answer
+	known := map[string]map[string]string{}
+	all, unk := mergeFailed(known, map[string]map[string]string{"system": {"demo.service": "failed"}, "user": {}})
+	if len(all) != 1 || len(unk) != 0 {
+		t.Fatal(all, unk)
+	}
+	all, unk = mergeFailed(known, map[string]map[string]string{"system": nil, "user": {}})
+	if all["demo.service"] != "failed" || len(unk) != 1 {
+		t.Fatal(all, unk)
+	}
+	all, _ = mergeFailed(known, map[string]map[string]string{"system": {}, "user": {}})
+	if len(all) != 0 {
+		t.Fatal(all)
+	}
+	// coverage does not change with the configuration
+	a1, a2 := &cover{fallback: 10}, &cover{fallback: 60}
+	for i := int64(0); i < 60; i++ {
+		r := Record{T: 1000 + i*60}
+		a1.add(r)
+		a2.add(r)
+	}
+	if a1.total() != a2.total() || a1.total() != 3600 {
+		t.Fatal(a1.total(), a2.total())
+	}
+	b := &cover{fallback: 10}
+	b.add(Record{T: 100, Secs: 10})
+	b.cut()
+	b.add(Record{T: 5000, Secs: 10})
+	if b.total() != 20 {
+		t.Fatal(b.total())
+	}
+	// a journal that stops early says so
+	if n, ok := journalCount(strings.NewReader(`{"_SYSTEMD_UNIT":"example.service"}{"bro`)); ok || n["example.service"] != 1 {
+		t.Fatal(n, ok)
+	}
+	if _, ok := journalCount(strings.NewReader(`{"_SYSTEMD_UNIT":"example.service"}`)); !ok {
+		t.Fatal("complete read marked partial")
+	}
+	// lost history and unknown sources reach the brief
+	got := brief(State{WriteSince: time.Now().Unix(), WriteError: "disk full", Unknown: []string{"system services"}}, time.Now(),
+		func(time.Time, func(Record)) error { return errors.New("broken") })
+	for _, w := range []string{"HISTORY NOT SAVED", "disk full", "system services unknown", "history unreadable"} {
+		if !strings.Contains(got, w) {
+			t.Fatal(got)
+		}
+	}
+	// facts survive the expiry of the day files; the last sample is found from the end
+	d := t.TempDir()
+	saveFacts(d, map[string]string{"kernel": "1"})
+	if lastFacts(d, time.Now(), 7)["kernel"] != "1" {
+		t.Fatal("facts lost")
+	}
+	now := time.Now()
+	appendRecord(d, Record{T: now.Unix() - 50, Type: "sample"})
+	appendRecord(d, Record{T: now.Unix() - 40, Type: "event", Kind: "start"})
+	if lastSample(d, now) != now.Unix()-50 {
+		t.Fatal(lastSample(d, now))
+	}
+}
+
+func TestWriteFailureIsVisible(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "gone")
+	if err := appendRecord(dir, Record{T: time.Now().Unix(), Type: "sample"}); err == nil {
+		t.Fatal("write to a missing directory succeeded")
 	}
 }

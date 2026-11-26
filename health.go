@@ -66,6 +66,26 @@ func (h *health) sum(pattern string) (total float64, ok bool) {
 	return
 }
 
+// perPackage counts a value that every CPU of a package repeats only once.
+func (h *health) perPackage(pattern string) (total float64, ok bool) {
+	seen := map[string]bool{}
+	for _, f := range h.glob(pattern) {
+		cpu := filepath.Dir(filepath.Dir(f))
+		pkg := readStr(cpu + "/topology/physical_package_id")
+		if pkg == "" {
+			pkg = cpu
+		}
+		if seen[pkg] {
+			continue
+		}
+		if v, good := readNum(f); good {
+			seen[pkg] = true
+			total, ok = total+v, true
+		}
+	}
+	return
+}
+
 // aer adds the totals of one PCI Express error class over all devices.
 func (h *health) aer(class, key string) (total float64, ok bool) {
 	for _, f := range h.glob("/sys/bus/pci/devices/*/" + class) {
@@ -142,7 +162,7 @@ func (h *health) list() []check {
 		{name: "pci_corrected", count: func() (float64, bool) { return h.aer("aer_dev_correctable", "TOTAL_ERR_COR") }},
 		{name: "memory_ecc_errors", count: func() (float64, bool) { return h.sum("/sys/devices/system/edac/mc/mc*/ue_count") }, problem: atLeastOne("uncorrected memory error")},
 		{name: "cpu_throttling", count: func() (float64, bool) {
-			return h.sum("/sys/devices/system/cpu/cpu[0-9]*/thermal_throttle/package_throttle_count")
+			return h.perPackage("/sys/devices/system/cpu/cpu[0-9]*/thermal_throttle/package_throttle_count")
 		}},
 		{name: "device_crash_dumps", count: func() (float64, bool) {
 			if _, err := os.Stat(h.root + "/sys/class/devcoredump"); err != nil {

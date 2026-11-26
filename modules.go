@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"io"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -138,6 +136,11 @@ func (s *sensors) readDisks(m map[string]float64, now time.Time) {
 		if v, ok := readNum(f); ok {
 			m["disk."+s.diskLabel(name, now)+".temp"] = v / 1000
 			m["disk_temp"] = max(m["disk_temp"], v/1000)
+			// degrees above the warning point of this very disk (10 below its limit)
+			over := v/1000 - (s.diskCrit[name] - 10)
+			if o, seen := m["disk_over"]; !seen || over > o {
+				m["disk_over"] = over
+			}
 		}
 	}
 }
@@ -223,54 +226,60 @@ func (s *sensors) facts() map[string]string {
 }
 
 // failedUnits lists failed system and user services by name.
-func failedUnits() map[string]string {
-	out := map[string]string{}
-	for _, scope := range []string{"--system", "--user"} {
+// A scope that cannot be read is nil: unknown, not "everything recovered".
+func failedUnits() map[string]map[string]string {
+	out := map[string]map[string]string{}
+	for _, scope := range []string{"system", "user"} {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		b, err := exec.CommandContext(ctx, "systemctl", scope, "list-units", "--state=failed", "--plain", "--no-legend", "--no-pager").Output()
+		b, err := exec.CommandContext(ctx, "systemctl", "--"+scope, "list-units", "--state=failed", "--plain", "--no-legend", "--no-pager").Output()
 		cancel()
 		if err != nil {
-			return nil // unknown, not "everything recovered"
+			out[scope] = nil
+			continue
 		}
+		m := map[string]string{}
 		for _, l := range strings.Split(string(b), "\n") {
 			if f := strings.Fields(l); len(f) > 0 && unitName.MatchString(f[0]) {
-				out[f[0]] = "failed"
+				m[f[0]] = "failed"
 			}
 		}
+		out[scope] = m
 	}
 	return out
 }
 
-// fileMarks fingerprints files declared by the user. Contents are hashed in
-// memory and never stored.
+// mergeFailed keeps the last known answer of a scope that did not answer now.
+func mergeFailed(known, now map[string]map[string]string) (all map[string]string, unknown []string) {
+	all = map[string]string{}
+	for _, scope := range []string{"system", "user"} {
+		m, ok := now[scope]
+		if !ok || m == nil {
+			unknown = append(unknown, scope+" services")
+			m = known[scope]
+		} else {
+			known[scope] = m
+		}
+		for k, v := range m {
+			all[k] = v
+		}
+	}
+	return
+}
+
+// fileMarks notices changes of files declared by the user from size, times
+// and inode. Like detected files, they are never opened.
 func fileMarks(paths []string) map[string]string {
 	out := map[string]string{}
 	for _, p := range paths {
 		if !allowed(p) { // checked again: the path may be a new link
 			continue
 		}
-		i, err := os.Stat(p)
-		if err != nil {
+		var st syscall.Stat_t
+		if syscall.Stat(p, &st) != nil {
 			out[p] = "missing"
 			continue
 		}
-		if !i.Mode().IsRegular() || i.Size() > 1<<20 {
-			out[p] = strconv.FormatInt(i.ModTime().UnixNano(), 36)
-			continue
-		}
-		f, err := os.Open(p)
-		if err != nil {
-			out[p] = "unreadable"
-			continue
-		}
-		h := sha256.New()
-		_, err = io.Copy(h, f)
-		f.Close()
-		if err != nil {
-			out[p] = "unreadable"
-			continue
-		}
-		out[p] = hex.EncodeToString(h.Sum(nil))[:16]
+		out[p] = fmt.Sprintf("%x.%x.%x.%x.%x", st.Size, st.Mtim.Nano(), st.Ctim.Nano(), st.Ino, st.Dev)
 	}
 	return out
 }

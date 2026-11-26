@@ -86,11 +86,25 @@ func (c *Config) apply(text, name string) (warn []string) {
 		}
 		k, v, ok := strings.Cut(l, "=")
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if !ok || !c.set(k, v) {
+		n := *c // a rejected line must not leave half of its value behind
+		if ok && n.Alerts != nil {
+			n.Alerts = cloneMap(n.Alerts)
+		}
+		if ok && n.set(k, v) {
+			*c = n
+		} else {
 			warn = append(warn, fmt.Sprintf("%s:%d: ignored %q", name, i+1, l))
 		}
 	}
 	return
+}
+
+func cloneMap[K comparable, V any](m map[K]V) map[K]V {
+	out := make(map[K]V, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 func (c *Config) set(k, v string) bool {

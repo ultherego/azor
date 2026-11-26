@@ -41,6 +41,7 @@ type sensors struct {
 	div                 map[string]float64 // metric -> divisor
 	crit                map[string]float64 // metric -> critical limit reported by the device
 	disks               map[string]string
+	diskCrit            map[string]float64
 	labels              map[string]string
 	labelsAt            time.Time
 	fans, freqFiles     []string
@@ -108,7 +109,7 @@ func firstOf(m map[string]string, names ...string) string {
 // change between boots.
 func (s *sensors) discover() {
 	s.src, s.div, s.crit = map[string]string{}, map[string]float64{}, map[string]float64{}
-	s.disks, s.fans, s.gpu = map[string]string{}, nil, gpuDev{}
+	s.disks, s.diskCrit, s.fans, s.gpu = map[string]string{}, map[string]float64{}, nil, gpuDev{}
 	s.freqFiles = s.glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq")
 	if s.cfg.on("gpu") && s.cfg.GPU != "off" {
 		s.pickGPU()
@@ -124,8 +125,9 @@ func (s *sensors) discover() {
 			f := d + "/temp1_input"
 			if _, ok := readNum(f); ok {
 				s.disks[diskName(d)] = f
-				if c, ok := readNum(d + "/temp1_crit"); ok && c >= 50e3 && c <= 150e3 && (s.crit["disk_temp"] == 0 || c/1000 < s.crit["disk_temp"]) {
-					s.crit["disk_temp"] = c / 1000
+				s.diskCrit[diskName(d)] = 75 + 10 // without a limit from the device
+				if c, ok := readNum(d + "/temp1_crit"); ok && c >= 50e3 && c <= 150e3 {
+					s.diskCrit[diskName(d)] = c / 1000
 				}
 			}
 		case "amdgpu", "nouveau", "i915", "xe":

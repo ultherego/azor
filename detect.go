@@ -226,6 +226,7 @@ type configScan struct {
 	found         time.Time
 	last          map[string]string
 	noisy         map[string]int
+	day           string
 }
 
 func newConfigScan() *configScan {
@@ -275,6 +276,9 @@ func (c *configScan) discover(running []string) {
 
 // changes compares size and modification time only; no file is opened.
 func (c *configScan) changes() (out []Record) {
+	if d := time.Now().Format("2006-01-02"); d != c.day {
+		c.day, c.noisy = d, map[string]int{} // the limit is per day
+	}
 	cur := map[string]string{}
 	by := map[string][]string{}
 	for prog, files := range c.targets {
@@ -284,9 +288,15 @@ func (c *configScan) changes() (out []Record) {
 				mark = strconv.FormatInt(i.Size(), 36) + "." + strconv.FormatInt(i.ModTime().UnixNano(), 36)
 			}
 			cur[f] = mark
-			if old, seen := c.last[f]; seen && old != mark {
+			old, seen := c.last[f]
+			name := filepath.Base(f)
+			if !seen && c.last != nil && mark != "missing" {
+				name += " (new)" // found by a later detection
+				seen, old = true, ""
+			}
+			if seen && old != mark {
 				if c.noisy[f]++; c.noisy[f] <= 5 { // a file that changes all the time is not news
-					by[prog] = append(by[prog], filepath.Base(f))
+					by[prog] = append(by[prog], name)
 				}
 			}
 		}

@@ -46,7 +46,7 @@ modules = all, -network
 # follow these programs
 watch.processes = firefox, steam
 
-# report when this file changes (its contents are never stored)
+# report when this file changes (it is never opened)
 watch.files = ~/scripts/backup.sh
 
 # report when this service starts, stops or fails

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -140,9 +141,13 @@ func timerStates(ts []timer) map[string]string {
 		if t.Result == "running" || t.Result == "unknown" || t.Result == "" || t.Last == 0 {
 			continue
 		}
-		out[t.Name] = "ok"
+		k := t.Name
+		if t.User {
+			k = "user " + t.Name
+		}
+		out[k] = "ok"
 		if t.failed() {
-			out[t.Name] = "failed: " + t.Result
+			out[k] = "failed: " + t.Result
 		}
 	}
 	return out
@@ -206,12 +211,25 @@ func (s *sensors) fsFacts(put func(k, v string)) {
 			name = s.stableName(filepath.Base(devs[0])) + " device " + id
 		}
 		var bad []string
+		valid := false
 		for _, l := range strings.Split(readStr(f), "\n") {
-			if p := strings.Fields(l); len(p) == 2 && p[1] != "0" {
+			p := strings.Fields(l)
+			if len(p) != 2 {
+				continue
+			}
+			if _, err := strconv.ParseUint(p[1], 10, 64); err != nil {
+				valid = false // the kernel says the counters cannot be trusted
+				break
+			}
+			valid = true
+			if p[1] != "0" {
 				bad = append(bad, strings.TrimSuffix(p[0], "_errs")+" "+p[1])
 			}
 		}
-		if len(bad) == 0 {
+		switch {
+		case !valid:
+			bad = []string{"unavailable"}
+		case len(bad) == 0:
 			bad = []string{"none"}
 		}
 		put("btrfs_errors "+name, strings.Join(bad, ", "))
