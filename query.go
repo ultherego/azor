@@ -274,7 +274,7 @@ func (s *summary) add(r Record, secs float64) {
 }
 
 func (s *summary) print(w io.Writer) {
-	fmt.Fprintf(w, "  %-28s %9s %9s  %s\n", "metric", "average", "peak", "peak at")
+	fmt.Fprintf(w, "  %-28s %9s %9s  %s\n", "metric", "average", "peak", "peak within the sample ending")
 	for _, m := range ordered(s.wt) {
 		p := s.peaks[m.key]
 		l, u := label(m.key)
@@ -395,12 +395,15 @@ func cmdRange(w io.Writer, args []string) error {
 				wider++
 			}
 			all.add(r, part)
-			mid := time.Unix(int64(max(float64(r.T)-secs, float64(from.Unix()))+part/2), 0)
-			i := max(0, min(int(mid.Sub(from)/step), rows-1))
-			if parts[i] == nil {
-				parts[i] = newSummary()
+			for i := range parts { // every row the sample reaches, with its share
+				lo := from.Add(time.Duration(i) * step)
+				if w := overlap(r.T, secs, lo, lo.Add(step)); w > 0 {
+					if parts[i] == nil {
+						parts[i] = newSummary()
+					}
+					parts[i].add(r, w)
+				}
 			}
-			parts[i].add(r, part)
 		case "event":
 			events = append(events, r)
 			if r.Kind == "gap" || r.Kind == "start" || r.Kind == "lost" {
@@ -525,7 +528,7 @@ func failedTimers(ts []timer) (out []string) {
 	for _, t := range ts {
 		if t.failed() {
 			n := t.Name
-			if t.Stale {
+			if t.Stale || t.Before {
 				n += " (last known)"
 			}
 			out = append(out, n)
@@ -674,9 +677,17 @@ func cmdPeaks(w io.Writer, args []string) error {
 		return err
 	}
 	s := newSummary()
-	if err := load(dataDir(), from, to, func(r Record) {
-		if r.Type == "sample" {
-			s.add(r, 1)
+	cfg, _ := loadConfig()
+	sp := &spans{fallback: cfg.Interval.Seconds()}
+	if err := load(dataDir(), from, to.Add(10*time.Minute), func(r Record) {
+		switch {
+		case r.Type == "sample":
+			secs, _ := sp.next(r) // the same weights as in azor range
+			if part := overlap(r.T, secs, from, to); part > 0 {
+				s.add(r, part)
+			}
+		case r.Type == "event" && (r.Kind == "gap" || r.Kind == "start" || r.Kind == "lost"):
+			sp.cut()
 		}
 	}); err != nil {
 		return err
@@ -857,7 +868,11 @@ func brief(s State, now time.Time, events func(time.Time, func(Record)) error) s
 		last[k] = r
 		count[k]++
 	}); err != nil {
-		parts = append(parts, "history unreadable: "+err.Error())
+		msg := err.Error()
+		if !strings.HasPrefix(msg, "history unreadable") {
+			msg = "history unreadable: " + msg
+		}
+		parts = append(parts, msg)
 	}
 	keys := sortedKeys(last)
 	sort.SliceStable(keys, func(a, b int) bool { return last[keys[a]].T > last[keys[b]].T })
@@ -871,6 +886,9 @@ func brief(s State, now time.Time, events func(time.Time, func(Record)) error) s
 		}
 	}
 	out := briefHead + strings.Join(parts, "; ")
+	if r := []rune(out); len(r) > briefMax-40 { // the problems alone are too long
+		out = string(r[:briefMax-40]) + "... (more: azor)"
+	}
 	for i, t := range changes {
 		sep := "; "
 		if i == 0 {
@@ -885,6 +903,9 @@ func brief(s State, now time.Time, events func(time.Time, func(Record)) error) s
 			break
 		}
 		out += sep + t
+	}
+	if r := []rune(out); len(r) > briefMax {
+		out = string(r[:briefMax-3]) + "..."
 	}
 	return out
 }

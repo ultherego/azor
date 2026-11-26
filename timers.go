@@ -26,6 +26,8 @@ type timer struct {
 	Dur    int64  `json:"dur,omitempty"` // seconds of the last run
 	// Stale: the result could not be read now; this is the last known one.
 	Stale bool `json:"stale,omitempty"`
+	// Before: systemd forgot the result at boot; this one was saved before it.
+	Before bool `json:"before,omitempty"`
 }
 
 func (t timer) failed() bool {
@@ -144,7 +146,34 @@ func readTimers(ignore []string) (out []timer, ok bool, unknown []string) {
 
 // mergeTimers keeps what was known before for what cannot be read now: the
 // timers of a scope that did not answer and results that could not be read.
-func mergeTimers(prev, now []timer, unknown []string) (out []timer) {
+const timersFile = "timers.json"
+
+// saveTimerStates keeps the last known results over a reboot, when systemd
+// forgets them.
+func saveTimerStates(dir string, m map[string]string) {
+	if len(m) > 0 {
+		writeAtomic(filepath.Join(dir, timersFile), m)
+	}
+}
+
+func loadTimerStates(dir string) map[string]string {
+	m := map[string]string{}
+	if b, err := os.ReadFile(filepath.Join(dir, timersFile)); err == nil {
+		json.Unmarshal(b, &m)
+	}
+	return m
+}
+
+func timerKey(t timer) string {
+	if t.User {
+		return "user " + t.Name
+	}
+	return t.Name
+}
+
+// mergeTimers keeps what was known for what cannot be read now. known holds
+// the saved states ("ok" or "failed: ...") from before the last boot.
+func mergeTimers(prev, now []timer, unknown []string, known map[string]string) (out []timer) {
 	old := map[string]timer{}
 	for _, t := range prev {
 		old[fmt.Sprint(t.User, t.Name)] = t
@@ -154,6 +183,14 @@ func mergeTimers(prev, now []timer, unknown []string) (out []timer) {
 		gone[strings.HasPrefix(u, "user")] = true
 	}
 	for _, t := range now {
+		if t.Result == "unknown" && t.Last > 0 {
+			switch s := known[timerKey(t)]; {
+			case s == "ok":
+				t.Result, t.Before = "success", true
+			case strings.HasPrefix(s, "failed: "):
+				t.Result, t.Before = strings.TrimPrefix(s, "failed: "), true
+			}
+		}
 		if t.Result == "unavailable" {
 			if p, ok := old[fmt.Sprint(t.User, t.Name)]; ok && p.Result != "" && p.Result != "unavailable" {
 				t.Result, t.Stale = p.Result, true
@@ -174,7 +211,7 @@ func mergeTimers(prev, now []timer, unknown []string) (out []timer) {
 // unsure lists timers whose result is not known now.
 func unsure(ts []timer) (out []string) {
 	for _, t := range ts {
-		if t.Stale || t.Result == "unavailable" {
+		if t.Stale || t.Result == "unavailable" || (t.Result == "unknown" && t.Last > 0) {
 			out = append(out, t.Name)
 		}
 	}
@@ -185,13 +222,10 @@ func unsure(ts []timer) (out []string) {
 func timerStates(ts []timer) map[string]string {
 	out := map[string]string{}
 	for _, t := range ts {
-		if t.Result == "running" || t.Result == "unknown" || t.Result == "unavailable" || t.Result == "" || t.Last == 0 || t.Stale {
+		if t.Result == "running" || t.Result == "unknown" || t.Result == "unavailable" || t.Result == "" || t.Last == 0 || t.Stale || t.Before {
 			continue
 		}
-		k := t.Name
-		if t.User {
-			k = "user " + t.Name
-		}
+		k := timerKey(t)
 		out[k] = "ok"
 		if t.failed() {
 			out[k] = "failed: " + t.Result
@@ -301,6 +335,7 @@ func cmdTimers(w io.Writer) error {
 	for _, u := range unk {
 		fmt.Fprintln(w, "UNKNOWN:", u, "could not be read")
 	}
+	ts = mergeTimers(nil, ts, nil, loadTimerStates(dataDir())) // results saved before the boot
 	at := func(t int64) string {
 		if t == 0 {
 			return "-"
@@ -318,6 +353,12 @@ func cmdTimers(w io.Writer) error {
 		}
 		if t.Result == "unknown" {
 			res = "unknown (not run since boot)"
+			if t.Last > 0 {
+				res = "UNKNOWN: ran before boot, result not saved"
+			}
+		}
+		if t.Before {
+			res += " (before boot)"
 		}
 		if t.Result == "unavailable" {
 			res = "UNKNOWN: could not be read"

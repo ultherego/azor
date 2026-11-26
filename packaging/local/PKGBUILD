@@ -16,7 +16,7 @@ prepare() {
   rm -rf "$srcdir/azor"
   mkdir -p "$srcdir/azor"
   cd "$startdir/../.."
-  cp -r ./*.go go.mod Makefile README.md LICENSE azor.conf azor.service claude "$srcdir/azor/"
+  cp -r ./*.go go.mod Makefile README.md SECURITY.md LICENSE azor.conf azor.service claude "$srcdir/azor/"
 }
 build() {
   cd "$srcdir/azor"

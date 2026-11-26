@@ -209,17 +209,27 @@ func runDaemon() error {
 	var lastSaved int64
 	// The time from which writing fails is also kept outside the history,
 	// so that a restart does not forget it.
-	marker := filepath.Join(filepath.Dir(stateFile()), "write_failed")
-	if b, err := os.ReadFile(marker); err == nil {
-		fmt.Sscan(string(b), &st.WriteSince)
-		st.WriteError = "writing failed before the last start"
+	// Twice: systemd may remove the runtime directory, and the data
+	// directory may be the one that cannot be written.
+	markers := []string{filepath.Join(filepath.Dir(stateFile()), "write_failed"), filepath.Join(dir, ".write_failed")}
+	for _, m := range markers {
+		var since int64
+		b, err := os.ReadFile(m)
+		if err != nil {
+			continue
+		}
+		if _, err := fmt.Sscan(string(b), &since); err == nil && since > 0 && (st.WriteSince == 0 || since < st.WriteSince) {
+			st.WriteSince, st.WriteError = since, "writing failed before the last start"
+		}
 	}
 	store := func(r Record) {
 		if err := appendRecord(dir, r); err != nil {
 			if st.WriteSince == 0 {
 				st.WriteSince = r.T
 				fmt.Fprintln(os.Stderr, "azor: write:", err)
-				os.WriteFile(marker, []byte(fmt.Sprint(r.T)), 0o600)
+				for _, m := range markers {
+					os.WriteFile(m, []byte(fmt.Sprint(r.T)), 0o600)
+				}
 			}
 			st.WriteError = err.Error()
 			return
@@ -231,7 +241,9 @@ func runDaemon() error {
 			}
 			if appendRecord(dir, Record{T: r.T, Type: "event", Kind: "lost", Secs: max(1, r.T-from)}) == nil {
 				st.WriteSince, st.WriteError = 0, ""
-				os.Remove(marker)
+				for _, m := range markers {
+					os.Remove(m)
+				}
 			}
 		}
 		lastSaved = r.T
@@ -278,7 +290,8 @@ func runDaemon() error {
 	}
 	var timersAt time.Time
 	units := map[string]map[string]string{}
-	var unknownTimers, unknownUnits []string
+	var unknownTimers, unknownUnits, unknownWatched []string
+	factsRebased := false
 	desktopAt := now
 	var hl *health
 	var dt *desktop
@@ -301,7 +314,7 @@ func runDaemon() error {
 			ts, ok, unk := readTimers(cfg.IgnoreTimers)
 			unknownTimers = unk
 			if ok || len(st.Timers) > 0 {
-				ts = mergeTimers(st.Timers, ts, unk)
+				ts = mergeTimers(st.Timers, ts, unk, seen["timer"])
 				st.Timers = ts
 				// A result is kept until the next known one, also over a reboot.
 				cur := timerStates(ts)
@@ -311,6 +324,7 @@ func runDaemon() error {
 					}
 				}
 				change("timer", cur, t)
+				saveTimerStates(dir, cur)
 			}
 		}
 		if u, complete := watchedUnits(cfg.WatchUnits); u != nil {
@@ -322,8 +336,11 @@ func runDaemon() error {
 				}
 			}
 			change("watched", u, t)
+			unknownWatched = nil
+			if !complete {
+				unknownWatched = []string{"watched units"}
+			}
 		}
-		st.Unknown = append(append([]string{}, unknownUnits...), unknownTimers...)
 		if cfg.on("facts") || dt != nil || cfg.on("filesystem") {
 			if cfg.on("facts") {
 				st.Facts = s.facts()
@@ -345,7 +362,8 @@ func runDaemon() error {
 					}
 				})
 			}
-			if !cfg.on("facts") { // only what is still collected is compared
+			if !cfg.on("facts") && !factsRebased { // only what is still collected is compared
+				factsRebased = true
 				part := map[string]string{}
 				for k := range st.Facts {
 					if v, ok := seen["fact"][k]; ok {
@@ -386,6 +404,7 @@ func runDaemon() error {
 			st.Failed = sortedKeys(f)
 			change("unit", f, t)
 		}
+		st.Unknown = append(append(append([]string{}, unknownUnits...), unknownTimers...), unknownWatched...)
 		if cfg.on("files") {
 			change("file", fileMarks(cfg.WatchFiles), t)
 			if time.Since(conf.found) > 10*time.Minute {
@@ -408,6 +427,14 @@ func runDaemon() error {
 		}
 	}
 	// Facts survive restarts, so a new kernel or driver setting is noticed.
+	seen["timer"] = loadTimerStates(dir)
+	if len(seen["timer"]) == 0 { // once, from the history written before the file existed
+		load(dir, now.AddDate(0, 0, -cfg.Retention), now, func(r Record) {
+			if r.Type == "event" && r.Kind == "timer" && r.New != "" {
+				seen["timer"][r.Key] = r.New
+			}
+		})
+	}
 	seen["fact"] = lastFacts(dir, now, cfg.Retention)
 	// Another program version or another set of modules collects other facts:
 	// what is new or gone then is not a change of the computer.

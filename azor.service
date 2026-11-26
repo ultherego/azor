@@ -12,6 +12,7 @@ MemoryMax=48M
 UMask=0077
 StateDirectory=azor
 RuntimeDirectory=azor
+RuntimeDirectoryPreserve=restart
 
 # No internet, no new privileges, nothing writable except its own data.
 NoNewPrivileges=yes

@@ -6,7 +6,7 @@ Please report a vulnerability privately through GitHub: **Security → Report a 
 
 ## Verifying the code
 
-Commits on `main` are signed with the maintainer's SSH key and shown as **Verified** on GitHub; force pushes and deleting `main` are blocked. Treat an unsigned commit on `main` as suspicious.
+From commit `7bf65bc` on, every commit on `main` is signed with the maintainer's SSH key and shown as **Verified** on GitHub, and GitHub rejects unsigned pushes, force pushes and deleting `main`. Earlier commits are not signed. Treat an unsigned commit after `7bf65bc` as suspicious.
 
 ## What Azor protects
 

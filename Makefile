@@ -28,5 +28,6 @@ install-system:
 	sed 's|@BIN@|/usr/bin/azor|' azor.service > "$(DESTDIR)/usr/lib/systemd/user/azor.service"
 	chmod 644 "$(DESTDIR)/usr/lib/systemd/user/azor.service"
 	install -Dm644 README.md "$(DESTDIR)/usr/share/doc/azor/README.md"
+	install -Dm644 SECURITY.md "$(DESTDIR)/usr/share/doc/azor/SECURITY.md"
 	install -Dm644 claude/README.md "$(DESTDIR)/usr/share/doc/azor/claude/README.md"
 	install -Dm644 claude/azor/SKILL.md "$(DESTDIR)/usr/share/doc/azor/claude/azor/SKILL.md"

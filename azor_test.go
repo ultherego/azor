@@ -1000,7 +1000,7 @@ func TestUnknownIsNotGood(t *testing.T) {
 	prev := []timer{{Name: "backup", Unit: "backup.service", Last: 9, Result: "exit-code"}, {Name: "snap", User: true, Last: 9, Result: "success"}}
 	// the result of a known timer cannot be read now
 	now := []timer{{Name: "backup", Unit: "backup.service", Last: 9, Result: "unavailable"}}
-	got := mergeTimers(prev, now, []string{"user timers"})
+	got := mergeTimers(prev, now, []string{"user timers"}, nil)
 	if len(got) != 2 || got[0].Result != "exit-code" || !got[0].Stale || len(unsure(got)) != 2 || strings.Join(failedTimers(got), "") != "backup (last known)" {
 		t.Fatalf("%+v", got)
 	}
@@ -1009,7 +1009,7 @@ func TestUnknownIsNotGood(t *testing.T) {
 		t.Fatal(b)
 	}
 	// nothing known before: still not "none failed"
-	got = mergeTimers(nil, now, nil)
+	got = mergeTimers(nil, now, nil, nil)
 	if len(unsure(got)) != 1 {
 		t.Fatalf("%+v", got)
 	}
@@ -1072,5 +1072,65 @@ func TestBriefResistsInjection(t *testing.T) {
 		if strings.Contains(strings.ReplaceAll(got, "->", ""), bad) {
 			t.Fatalf("%q in %q", bad, got)
 		}
+	}
+}
+
+func TestTimersAfterBoot(t *testing.T) {
+	known := map[string]string{"backup": "failed: exit-code", "snap": "ok"}
+	now := []timer{{Name: "backup", Last: 9, Result: "unknown"}, {Name: "snap", Last: 9, Result: "unknown"},
+		{Name: "new", Last: 9, Result: "unknown"}, {Name: "first", Result: "unknown"}, {Name: "fine", Last: 9, Result: "success"}}
+	got := mergeTimers(nil, now, nil, known)
+	if f := strings.Join(failedTimers(got), ","); f != "backup (last known)" {
+		t.Fatal(f)
+	}
+	if u := strings.Join(unsure(got), ","); u != "new" { // ran before boot, nothing saved
+		t.Fatal(u)
+	}
+	if s := timerStates(got); len(s) != 1 || s["fine"] != "ok" {
+		t.Fatal("results from before boot became new events", s)
+	}
+	b := brief(State{Timers: got}, time.Now(), func(time.Time, func(Record)) error { return nil })
+	if strings.Contains(b, "no problems") || !strings.Contains(b, "FAILED TIMERS backup") || !strings.Contains(b, "unknown result now new") {
+		t.Fatal(b)
+	}
+	d := t.TempDir()
+	saveTimerStates(d, known)
+	if loadTimerStates(d)["backup"] != "failed: exit-code" {
+		t.Fatal("timer states not kept")
+	}
+}
+
+func TestBriefStaysShort(t *testing.T) {
+	var ts []timer
+	for i := 0; i < 8; i++ {
+		ts = append(ts, timer{Name: fmt.Sprint("a-very-long-timer-name-for-testing-", i), Last: 9, Result: "exit-code"})
+	}
+	st := State{Timers: ts, Unknown: []string{"system services", "user timers"}, Problems: []string{strings.Repeat("problem ", 30)},
+		Failed: []string{strings.Repeat("s", 70) + ".service", strings.Repeat("t", 70) + ".service", strings.Repeat("u", 70) + ".service", strings.Repeat("v", 70) + ".service", "x.service"}}
+	got := brief(st, time.Now(), func(_ time.Time, fn func(Record)) error {
+		fn(Record{Type: "event", Kind: "config", Key: "niri", T: time.Now().Unix()})
+		return nil
+	})
+	if n := len([]rune(got)); n > briefMax {
+		t.Fatal(n, got)
+	}
+	b := brief(State{}, time.Now(), func(time.Time, func(Record)) error { return errors.New("history unreadable: denied") })
+	if strings.Count(b, "history unreadable") != 1 {
+		t.Fatal(b)
+	}
+}
+
+func TestTimerStatesFromHistory(t *testing.T) {
+	d := t.TempDir()
+	appendRecord(d, Record{T: time.Now().Unix() - 60, Type: "event", Kind: "timer", Key: "borgmatic", Old: "", New: "failed: exit-code"})
+	appendRecord(d, Record{T: time.Now().Unix() - 30, Type: "event", Kind: "timer", Key: "borgmatic", Old: "failed: exit-code", New: "ok"})
+	m := loadTimerStates(d)
+	load(d, time.Now().Add(-time.Hour), time.Now(), func(r Record) {
+		if r.Type == "event" && r.Kind == "timer" && r.New != "" {
+			m[r.Key] = r.New
+		}
+	})
+	if m["borgmatic"] != "ok" {
+		t.Fatal(m)
 	}
 }
