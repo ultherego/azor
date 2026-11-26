@@ -271,6 +271,7 @@ func runDaemon() error {
 	sys.scan(systemCgroup, 0)
 	// slow watches settings, services and declared files for changes.
 	seen := map[string]map[string]string{}
+	runs, lastRun := map[string]run{}, map[string]int64{}
 	change := func(kind string, cur map[string]string, t time.Time) {
 		old, known := seen[kind]
 		if cur == nil {
@@ -282,6 +283,9 @@ func runDaemon() error {
 		}
 		for _, k := range diff(old, cur) {
 			e := Record{T: t.Unix(), Type: "event", Kind: kind, Key: short(k)}
+			if kind == "timer" {
+				e.Val = float64(lastRun[k]) // which run the result belongs to
+			}
 			if kind != "file" {
 				e.Old, e.New = old[k], cur[k]
 			}
@@ -289,6 +293,7 @@ func runDaemon() error {
 		}
 	}
 	var timersAt time.Time
+	var unknownSave []string
 	units := map[string]map[string]string{}
 	var unknownTimers, unknownUnits, unknownWatched []string
 	factsRebased := false
@@ -314,7 +319,7 @@ func runDaemon() error {
 			ts, ok, unk := readTimers(cfg.IgnoreTimers)
 			unknownTimers = unk
 			if ok || len(st.Timers) > 0 {
-				ts = mergeTimers(st.Timers, ts, unk, seen["timer"])
+				ts = mergeTimers(st.Timers, ts, unk, runs)
 				st.Timers = ts
 				// A result is kept until the next known one, also over a reboot.
 				cur := timerStates(ts)
@@ -323,8 +328,17 @@ func runDaemon() error {
 						cur[k] = v
 					}
 				}
+				for _, x := range ts { // the run each result belongs to
+					if s, ok := timerStates([]timer{x})[timerKey(x)]; ok {
+						runs[timerKey(x)] = run{s, x.Last}
+						lastRun[timerKey(x)] = x.Last
+					}
+				}
 				change("timer", cur, t)
-				saveTimerStates(dir, cur)
+				unknownSave = nil
+				if err := saveRuns(dir, runs); err != nil {
+					unknownSave = []string{"timer results not saved (" + err.Error() + ")"}
+				}
 			}
 		}
 		if u, complete := watchedUnits(cfg.WatchUnits); u != nil {
@@ -404,7 +418,7 @@ func runDaemon() error {
 			st.Failed = sortedKeys(f)
 			change("unit", f, t)
 		}
-		st.Unknown = append(append(append([]string{}, unknownUnits...), unknownTimers...), unknownWatched...)
+		st.Unknown = append(append(append(append([]string{}, unknownUnits...), unknownTimers...), unknownWatched...), unknownSave...)
 		if cfg.on("files") {
 			change("file", fileMarks(cfg.WatchFiles), t)
 			if time.Since(conf.found) > 10*time.Minute {
@@ -427,13 +441,12 @@ func runDaemon() error {
 		}
 	}
 	// Facts survive restarts, so a new kernel or driver setting is noticed.
-	seen["timer"] = loadTimerStates(dir)
-	if len(seen["timer"]) == 0 { // once, from the history written before the file existed
-		load(dir, now.AddDate(0, 0, -cfg.Retention), now, func(r Record) {
-			if r.Type == "event" && r.Kind == "timer" && r.New != "" {
-				seen["timer"][r.Key] = r.New
-			}
-		})
+	if cfg.on("timers") {
+		runs = knownRuns(dir, now, cfg.Retention)
+		seen["timer"] = map[string]string{}
+		for k, r := range runs {
+			seen["timer"][k] = r.State
+		}
 	}
 	seen["fact"] = lastFacts(dir, now, cfg.Retention)
 	// Another program version or another set of modules collects other facts:

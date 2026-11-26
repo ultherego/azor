@@ -1076,27 +1076,68 @@ func TestBriefResistsInjection(t *testing.T) {
 }
 
 func TestTimersAfterBoot(t *testing.T) {
-	known := map[string]string{"backup": "failed: exit-code", "snap": "ok"}
+	known := map[string]run{"backup": {"failed: exit-code", 9}, "snap": {"ok", 9}, "moved": {"ok", 5}}
 	now := []timer{{Name: "backup", Last: 9, Result: "unknown"}, {Name: "snap", Last: 9, Result: "unknown"},
+		{Name: "moved", Last: 7, Result: "unknown"}, // ran again while Azor was away
 		{Name: "new", Last: 9, Result: "unknown"}, {Name: "first", Result: "unknown"}, {Name: "fine", Last: 9, Result: "success"}}
 	got := mergeTimers(nil, now, nil, known)
 	if f := strings.Join(failedTimers(got), ","); f != "backup (last known)" {
 		t.Fatal(f)
 	}
-	if u := strings.Join(unsure(got), ","); u != "new" { // ran before boot, nothing saved
+	if u := strings.Join(unsure(got), ","); u != "moved,new" { // another run, or nothing saved
 		t.Fatal(u)
 	}
 	if s := timerStates(got); len(s) != 1 || s["fine"] != "ok" {
 		t.Fatal("results from before boot became new events", s)
 	}
 	b := brief(State{Timers: got}, time.Now(), func(time.Time, func(Record)) error { return nil })
-	if strings.Contains(b, "no problems") || !strings.Contains(b, "FAILED TIMERS backup") || !strings.Contains(b, "unknown result now new") {
+	if strings.Contains(b, "no problems") || !strings.Contains(b, "FAILED TIMERS backup") || !strings.Contains(b, "unknown result now moved, new") {
 		t.Fatal(b)
 	}
+	var w strings.Builder
+	cmdNowTimers(&w, []timer{{Name: "snap", Last: 9, Result: "success", Before: true}, {Name: "fine", Last: 9, Result: "success"}})
+	if !strings.Contains(w.String(), "1 confirmed since boot") {
+		t.Fatal(w.String())
+	}
+}
+
+func TestKnownRunsPreferNewerHistory(t *testing.T) {
 	d := t.TempDir()
-	saveTimerStates(d, known)
-	if loadTimerStates(d)["backup"] != "failed: exit-code" {
-		t.Fatal("timer states not kept")
+	if err := saveRuns(d, map[string]run{"backup": {"ok", 100}, "old": {"ok", 50}}); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(d, "x"), nil, 0o600)
+	past := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(filepath.Join(d, timersFile), past, past) // the file could not be updated since
+	appendRecord(d, Record{T: time.Now().Unix() - 60, Type: "event", Kind: "timer", Key: "backup", Old: "ok", New: "failed: exit-code", Val: 200})
+	appendRecord(d, Record{T: time.Now().Unix() - 50, Type: "event", Kind: "timer", Key: "nameless", New: "ok"}) // older version: no run time
+	m := knownRuns(d, time.Now(), 7)
+	if m["backup"] != (run{"failed: exit-code", 200}) || m["old"].State != "ok" {
+		t.Fatal(m)
+	}
+	if _, ok := m["nameless"]; ok {
+		t.Fatal("a result without its run was used")
+	}
+	// an old file of names and states only is not trusted
+	os.WriteFile(filepath.Join(d, timersFile), []byte(`{"backup":"ok"}`), 0o600)
+	if m := knownRuns(t.TempDir(), time.Now(), 7); len(m) != 0 {
+		t.Fatal(m)
+	}
+}
+
+func TestTimelineMarksLongSamples(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	os.MkdirAll(dataDir(), 0o700)
+	end := time.Now().Add(-time.Hour).Truncate(time.Minute)
+	appendRecord(dataDir(), Record{T: end.Unix(), Type: "sample", Secs: 600, Avg: map[string]float64{"cpu": 1}, Max: map[string]float64{"cpu": 100}})
+	var w strings.Builder
+	if err := cmdRange(&w, []string{end.Add(-3 * time.Minute).Format("2006-01-02 15:04"), end.Add(-2 * time.Minute).Format("2006-01-02 15:04")}); err != nil {
+		t.Fatal(err)
+	}
+	out := w.String()
+	if !strings.Contains(out, "(~100)") || strings.Contains(out, "no data") || !strings.Contains(out, "100% of the range covered") {
+		t.Fatal(out)
 	}
 }
 
@@ -1117,21 +1158,6 @@ func TestBriefStaysShort(t *testing.T) {
 	b := brief(State{}, time.Now(), func(time.Time, func(Record)) error { return errors.New("history unreadable: denied") })
 	if strings.Count(b, "history unreadable") != 1 {
 		t.Fatal(b)
-	}
-}
-
-func TestTimerStatesFromHistory(t *testing.T) {
-	d := t.TempDir()
-	appendRecord(d, Record{T: time.Now().Unix() - 60, Type: "event", Kind: "timer", Key: "borgmatic", Old: "", New: "failed: exit-code"})
-	appendRecord(d, Record{T: time.Now().Unix() - 30, Type: "event", Kind: "timer", Key: "borgmatic", Old: "failed: exit-code", New: "ok"})
-	m := loadTimerStates(d)
-	load(d, time.Now().Add(-time.Hour), time.Now(), func(r Record) {
-		if r.Type == "event" && r.Kind == "timer" && r.New != "" {
-			m[r.Key] = r.New
-		}
-	})
-	if m["borgmatic"] != "ok" {
-		t.Fatal(m)
 	}
 }
 

@@ -172,13 +172,7 @@ func cmdNow(w io.Writer) error {
 	if u := unsure(s.Timers); len(u) > 0 {
 		fmt.Fprintln(w, "TIMERS WITH UNKNOWN RESULT NOW:", strings.Join(u, ", "))
 	} else if len(s.Timers) > 0 && len(failedTimers(s.Timers)) == 0 {
-		n := 0
-		for _, t := range s.Timers {
-			if t.Result == "success" {
-				n++
-			}
-		}
-		fmt.Fprintf(w, "Timers: %d, none failed, %d confirmed since boot (azor timers)\n", len(s.Timers), n)
+		cmdNowTimers(w, s.Timers)
 	}
 	if len(s.Failed) > 0 {
 		fmt.Fprintln(w, "FAILED SERVICES:", strings.Join(s.Failed, ", "))
@@ -192,6 +186,17 @@ func cmdNow(w io.Writer) error {
 }
 
 // parseTime accepts HH:MM (latest past occurrence), a full date and time, or now.
+// cmdNowTimers counts only results confirmed during this boot.
+func cmdNowTimers(w io.Writer, ts []timer) {
+	n := 0
+	for _, t := range ts {
+		if t.Result == "success" && !t.Before && !t.Stale {
+			n++
+		}
+	}
+	fmt.Fprintf(w, "Timers: %d, none failed, %d confirmed since boot (azor timers)\n", len(ts), n)
+}
+
 func parseTime(s string, now time.Time) (time.Time, error) {
 	if s == "now" {
 		return now, nil
@@ -249,6 +254,7 @@ type summary struct {
 	last  int64
 	sum   map[string]float64
 	wt    map[string]float64 // seconds behind each average
+	wide  bool               // holds part of a sample longer than itself
 	peaks map[string]peak
 }
 
@@ -402,6 +408,9 @@ func cmdRange(w io.Writer, args []string) error {
 						parts[i] = newSummary()
 					}
 					parts[i].add(r, w)
+					if w < secs-1 { // its maximum may lie outside this row
+						parts[i].wide = true
+					}
 				}
 			}
 		case "event":
@@ -465,7 +474,7 @@ func cmdRange(w io.Writer, args []string) error {
 			fmt.Fprintf(w, "  note: %d samples reach outside the range; their values are averages over their whole length\n", wider)
 		}
 		all.print(w)
-		fmt.Fprintln(w, "Timeline (averages, peak in brackets):")
+		fmt.Fprintln(w, "Timeline (averages, peak in brackets; ~ = the peak of a longer sample, it may lie outside the row):")
 		for i, p := range parts {
 			at := from.Add(time.Duration(i) * step).Format("01-02 15:04")
 			if p == nil {
@@ -476,7 +485,11 @@ func cmdRange(w io.Writer, args []string) error {
 			for _, c := range []struct{ key, name, unit string }{{"cpu", "CPU", "%"}, {"cpu_temp", "", "C"}, {"gpu", "GPU", "%"},
 				{"gpu_temp", "", "C"}, {"gpu_power", "", "W"}, {"gpu_fan", "fan", "RPM"}, {"gpu_fan_pct", "fan", "%"}, {"mem", "RAM", "%"}} {
 				if n := p.wt[c.key]; n > 0 {
-					cols = append(cols, strings.TrimSpace(fmt.Sprintf("%s %.0f%s (%.0f)", c.name, p.sum[c.key]/n, c.unit, p.peaks[c.key].v)))
+					mark := ""
+					if p.wide {
+						mark = "~"
+					}
+					cols = append(cols, strings.TrimSpace(fmt.Sprintf("%s %.0f%s (%s%.0f)", c.name, p.sum[c.key]/n, c.unit, mark, p.peaks[c.key].v)))
 				}
 			}
 			fmt.Fprintf(w, "  %s  %s\n", at, strings.Join(cols, "  "))
