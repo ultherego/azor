@@ -26,12 +26,12 @@ type timer struct {
 	Dur    int64  `json:"dur,omitempty"` // seconds of the last run
 	// Stale: the result could not be read now; this is the last known one.
 	Stale bool `json:"stale,omitempty"`
-	// Before: systemd forgot the result at boot; this one was saved before it.
+	// Before: systemd no longer tells this run's result; this one was saved earlier.
 	Before bool `json:"before,omitempty"`
 }
 
 func (t timer) failed() bool {
-	return t.Last > 0 && t.Result != "" && t.Result != "success" && t.Result != "running" && t.Result != "unknown" && t.Result != "unavailable"
+	return t.Last > 0 && t.Result != "" && t.Result != "success" && t.Result != "running" && t.Result != "unknown" && t.Result != "unavailable" && t.Result != "other run"
 }
 
 func systemctl(args ...string) ([]byte, bool) {
@@ -123,13 +123,20 @@ func readTimers(ignore []string) (out []timer, ok bool, unknown []string) {
 		if len(units) == 0 {
 			continue
 		}
-		b, shown := systemctl(append([]string{scope, "show", "--no-pager", "--timestamp=unix", "-p", "Id,Result,ActiveState,ExecMainStartTimestamp,ExecMainExitTimestamp", "--"}, units...)...)
+		b, shown := systemctl(append([]string{scope, "show", "--no-pager", "--timestamp=unix", "-p", "Id,Result,ActiveState,InactiveExitTimestamp,ExecMainStartTimestamp,ExecMainExitTimestamp", "--"}, units...)...)
 		info := parseShow(string(b))
 		for _, t := range ts {
 			m := info[t.Unit]
 			t.Result = result(m)
 			if !shown {
 				t.Result = "unavailable"
+			}
+			var started int64
+			fmt.Sscanf(m["InactiveExitTimestamp"], "@%d", &started)
+			if !fromTrigger(t.Last, started) && t.Result != "unknown" && t.Result != "unavailable" && t.Result != "running" {
+				// another timer or a manual start ran the service later: its
+				// result says nothing about this timer's run
+				t.Result = "other run"
 			}
 			var a, z int64
 			fmt.Sscanf(m["ExecMainStartTimestamp"], "@%d", &a)
@@ -142,6 +149,12 @@ func readTimers(ignore []string) (out []timer, ok bool, unknown []string) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return
+}
+
+// fromTrigger tells whether the service started with this trigger. systemd
+// starts it right away; a start much later belongs to another trigger.
+func fromTrigger(last, started int64) bool {
+	return started == 0 || last == 0 || (started >= last-60 && started <= last+60)
 }
 
 // mergeTimers keeps what was known before for what cannot be read now: the
@@ -212,7 +225,7 @@ func mergeTimers(prev, now []timer, unknown []string, known map[string]run) (out
 		gone[strings.HasPrefix(u, "user")] = true
 	}
 	for _, t := range now {
-		if k, ok := known[timerKey(t)]; ok && t.Result == "unknown" && t.Last > 0 && k.Last == t.Last {
+		if k, ok := known[timerKey(t)]; ok && (t.Result == "unknown" || t.Result == "other run") && t.Last > 0 && k.Last == t.Last {
 			switch s := k.State; {
 			case s == "ok":
 				t.Result, t.Before = "success", true
@@ -240,7 +253,7 @@ func mergeTimers(prev, now []timer, unknown []string, known map[string]run) (out
 // unsure lists timers whose result is not known now.
 func unsure(ts []timer) (out []string) {
 	for _, t := range ts {
-		if t.Stale || t.Result == "unavailable" || (t.Result == "unknown" && t.Last > 0) {
+		if t.Stale || t.Result == "unavailable" || t.Result == "other run" || (t.Result == "unknown" && t.Last > 0) {
 			out = append(out, t.Name)
 		}
 	}
@@ -251,7 +264,7 @@ func unsure(ts []timer) (out []string) {
 func timerStates(ts []timer) map[string]string {
 	out := map[string]string{}
 	for _, t := range ts {
-		if t.Result == "running" || t.Result == "unknown" || t.Result == "unavailable" || t.Result == "" || t.Last == 0 || t.Stale || t.Before {
+		if t.Result == "running" || t.Result == "unknown" || t.Result == "unavailable" || t.Result == "other run" || t.Result == "" || t.Last == 0 || t.Stale || t.Before {
 			continue
 		}
 		k := timerKey(t)
@@ -387,10 +400,13 @@ func cmdTimers(w io.Writer) error {
 			}
 		}
 		if t.Before {
-			res += " (saved before boot)"
+			res += " (saved earlier)"
 		}
 		if t.Result == "unavailable" {
 			res = "UNKNOWN: could not be read"
+		}
+		if t.Result == "other run" {
+			res = "UNKNOWN: the service last ran from another start"
 		}
 		if t.failed() {
 			res = "FAILED: " + res

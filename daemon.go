@@ -271,7 +271,7 @@ func runDaemon() error {
 	sys.scan(systemCgroup, 0)
 	// slow watches settings, services and declared files for changes.
 	seen := map[string]map[string]string{}
-	runs, lastRun := map[string]run{}, map[string]int64{}
+	runs, lastRun, logged := map[string]run{}, map[string]int64{}, map[string]int64{}
 	change := func(kind string, cur map[string]string, t time.Time) {
 		old, known := seen[kind]
 		if cur == nil {
@@ -338,6 +338,14 @@ func runDaemon() error {
 				unknownSave = nil
 				if err := saveRuns(dir, runs); err != nil {
 					unknownSave = []string{"timer results not saved (" + err.Error() + ")"}
+					for k, r := range runs { // the history keeps every run then, also a repeated result
+						if logged[k] != r.Last {
+							store(Record{T: t.Unix(), Type: "event", Kind: "timer", Key: k, Old: r.State, New: r.State, Val: float64(r.Last)})
+						}
+					}
+				}
+				for k, r := range runs {
+					logged[k] = r.Last
 				}
 			}
 		}
@@ -409,7 +417,7 @@ func runDaemon() error {
 			st.Desktop = dt.scan(t.Sub(desktopAt).Seconds())
 			desktopAt = t
 			if len(st.Desktop) > 0 {
-				store(Record{T: t.Unix(), Type: "procs", Desktop: st.Desktop})
+				store(Record{T: t.Unix(), Type: "procs", MemDef: 2, Desktop: st.Desktop})
 			}
 		}
 		if cfg.on("services") {
@@ -446,6 +454,7 @@ func runDaemon() error {
 		seen["timer"] = map[string]string{}
 		for k, r := range runs {
 			seen["timer"][k] = r.State
+			logged[k] = r.Last
 		}
 	}
 	seen["fact"] = lastFacts(dir, now, cfg.Retention)
@@ -504,7 +513,7 @@ func runDaemon() error {
 				if cfg.on("services") {
 					st.System = notable(sys.scan(systemCgroup, d.Seconds()), 3)
 				}
-				store(Record{T: now.Unix(), Type: "procs", CPU: st.CPU, Mem: st.Mem, Watch: st.Watch, Services: st.Services, System: st.System})
+				store(Record{T: now.Unix(), Type: "procs", MemDef: 2, CPU: st.CPU, Mem: st.Mem, Watch: st.Watch, Services: st.Services, System: st.System})
 			}
 			if cfg.on("disks") || cfg.on("filesystem") {
 				if fs := filesystems(readStr("/proc/self/mounts"), fsUsed); len(fs) > 0 {

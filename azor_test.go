@@ -1119,8 +1119,9 @@ func TestKnownRunsPreferNewerHistory(t *testing.T) {
 		t.Fatal("a result without its run was used")
 	}
 	// an old file of names and states only is not trusted
-	os.WriteFile(filepath.Join(d, timersFile), []byte(`{"backup":"ok"}`), 0o600)
-	if m := knownRuns(t.TempDir(), time.Now(), 7); len(m) != 0 {
+	d2 := t.TempDir()
+	os.WriteFile(filepath.Join(d2, timersFile), []byte(`{"backup":"ok"}`), 0o600)
+	if m := knownRuns(d2, time.Now(), 7); len(m) != 0 {
 		t.Fatal(m)
 	}
 }
@@ -1170,5 +1171,46 @@ func TestFileCacheIsApart(t *testing.T) {
 	}
 	if !strings.Contains(p.extras(), "file cache") {
 		t.Fatal(p.extras())
+	}
+}
+
+func TestServiceRunBelongsToItsTimer(t *testing.T) {
+	const nightly = 57600 // 16:00
+	if !fromTrigger(nightly, nightly+1) || fromTrigger(nightly, nightly+3600) || fromTrigger(nightly, nightly-3600) {
+		t.Fatal("trigger matching")
+	}
+	// weekly (17:00) ran the same service with success; nightly's own 16:00 failure was seen before
+	now := []timer{{Name: "nightly", Last: nightly, Result: "other run"}, {Name: "weekly", Last: nightly + 3600, Result: "success"}}
+	known := map[string]run{"nightly": {"failed: exit-code", nightly}}
+	got := mergeTimers(nil, now, nil, known)
+	if f := strings.Join(failedTimers(got), ","); f != "nightly (last known)" {
+		t.Fatal(f, got)
+	}
+	if s := timerStates(got); s["nightly"] != "" || s["weekly"] != "ok" {
+		t.Fatal("the other run became nightly's result", s)
+	}
+	// nothing known about nightly's run: it is unknown, not a success
+	got = mergeTimers(nil, now, nil, nil)
+	if u := strings.Join(unsure(got), ","); u != "nightly" || len(failedTimers(got)) != 0 {
+		t.Fatal(u)
+	}
+	b := brief(State{Timers: got}, time.Now(), func(time.Time, func(Record)) error { return nil })
+	if strings.Contains(b, "no problems") {
+		t.Fatal(b)
+	}
+}
+
+func TestMixedMemoryRecords(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	os.MkdirAll(dataDir(), 0o700)
+	end := time.Now().Add(-time.Hour).Truncate(time.Minute)
+	appendRecord(dataDir(), Record{T: end.Unix() - 120, Type: "procs", Services: []proc{{Name: "s", MB: 900}}})
+	appendRecord(dataDir(), Record{T: end.Unix() - 60, Type: "procs", MemDef: 2, Services: []proc{{Name: "s", MB: 100, Cache: 800}}})
+	appendRecord(dataDir(), Record{T: end.Unix(), Type: "procs", MemDef: 2, Services: []proc{{Name: "s", MB: 110, Cache: 790}}})
+	var w strings.Builder
+	cmdRange(&w, []string{end.Add(-5 * time.Minute).Format("2006-01-02 15:04"), end.Format("2006-01-02 15:04")})
+	if !strings.Contains(w.String(), "RAM 100 -> 110 MB") || !strings.Contains(w.String(), "without file cache since") {
+		t.Fatal(w.String())
 	}
 }
