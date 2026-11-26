@@ -4,6 +4,10 @@
 
 Please report a vulnerability privately through GitHub: **Security → Report a vulnerability** on this repository. Do not open a public issue for it.
 
+## Verifying the code
+
+Commits on `main` are signed with the maintainer's SSH key and shown as **Verified** on GitHub; force pushes and deleting `main` are blocked. Treat an unsigned commit on `main` as suspicious.
+
 ## What Azor protects
 
 - **No root, no network.** The daemon runs as your user, in a systemd sandbox that allows only local (Unix) sockets and a read-only view of the system.
