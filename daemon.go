@@ -513,7 +513,7 @@ func runDaemon() error {
 		}
 		if d := now.Sub(lastTick.Round(0)); d > gapAfter || slept > 0 {
 			if slept == 0 || d-slept > gapAfter { // a pause the suspend does not explain
-				store(Record{T: now.Unix(), Type: "event", Kind: "gap", Secs: int64((d - slept).Seconds())})
+				store(Record{T: now.Unix(), Type: "event", Kind: "gap", Key: "paused", Secs: int64((d - slept).Seconds())})
 			}
 			a, lastFlush, lastProc = newAgg(), now, now
 			s.discover()

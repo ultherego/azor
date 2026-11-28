@@ -18,7 +18,7 @@ Usage:
   azor status               daemon health and storage
   azor brief                one short line (for hooks)
   azor hardware             detected sensors and alert limits
-  azor desktop             detected desktop, displays and its parts
+  azor desktop              detected desktop, displays and its parts
   azor snapshots [SPAN]     snapshots taken when alerts started
   azor snapshot latest|N|HH:MM  one snapshot in detail
   azor compare update|boots  before/after the last update, or the last two boots
@@ -26,14 +26,14 @@ Usage:
   azor problems [SPAN]      what keeps coming back (default 30d)
   azor json now|events|snapshots|timers|health  the same as JSON, for programs
   azor export [SPAN]        raw records as JSON lines (review before sharing)
-  azor health              detected health checks and problems
+  azor health               detected health checks and problems
   azor timers               scheduled jobs and their last result
   azor init                 create ~/.config/azor/azor.conf
   azor files                detected configuration files
   azor config               effective configuration
   azor daemon               run the collector (used by systemd)
 
-Times: HH:MM, "YYYY-MM-DD HH:MM", or now. Durations: 30m, 6h, 72h.
+Times: HH:MM, "YYYY-MM-DD HH:MM", or now. Durations: 30m, 6h, 72h, 7d.
 `
 
 func dataDir() string {

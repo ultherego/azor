@@ -23,9 +23,11 @@ Azor is a small daemon that records the computer's state every few seconds, also
 | what keeps coming back | `azor problems` (default 30 days) |
 | the same views as JSON | `azor json now`, `azor json events 24h`, `azor json snapshots`, `azor json timers`, `azor json health` |
 | what this computer can measure | `azor hardware` |
-| is Azor itself working | `azor status`, `systemctl --user status azor` |
+| is Azor itself working, how much disk its history uses | `azor status`, `systemctl --user status azor` |
+| settings in use, configuration files it watches | `azor config`, `azor files` |
+| raw records (may name programs and files; ask before sharing them) | `azor export 1h` |
 
-HH:MM means its latest past occurrence. Durations such as `24h` or `7d` count back from now. Every sample is kept for the retention (7 days by default); older periods have hourly summaries for 30 days and daily ones for 90 days, which `azor range` uses when no samples are left, and say so. All history stays under `max_disk` (200 MB by default); when it would not, the oldest days lose their samples early and, if still needed, the oldest summaries go.
+HH:MM means its latest past occurrence; a range of HH:MM times under a day that reaches past now ends now (`azor range 12:00 15:00` at 14:00 is today 12:00 until now, and says so). Check the `Range` line for the dates actually used. Durations such as `24h` or `7d` count back from now. Every sample is kept for the retention (7 days by default); older periods have hourly summaries for 30 days and daily ones for 90 days, which `azor range` uses when no samples are left, and say so. All history stays under `max_disk` (200 MB by default); when it would not, the oldest days lose their samples early and, if still needed, the oldest summaries go.
 
 ## Method
 
@@ -39,11 +41,11 @@ HH:MM means its latest past occurrence. Durations such as `24h` or `7d` count ba
 ## Reading the output
 
 ### Coverage, gaps and missing data
-- "N% of the range covered": the rest has no data. The `time:` line splits it into recorded, suspended, computer off, Azor not running, interrupted, not saved and unknown; `data per group` tells which sensors had readings in the recorded time. A desktop is switched off, suspended or logged out; that is normal, but it means "nothing recorded", not "nothing happened".
+- "N% of the range covered": the rest has no data. The `time:` line splits it into recorded, suspended, computer off, Azor not running, Azor paused, Azor interrupted, not saved and unknown; `data per group` tells which sensors had readings in the recorded time. A desktop is switched off, suspended or logged out; that is normal, but it means "nothing recorded", not "nothing happened".
 - `BOOT`: a new boot; the time before it was off or without data. "the previous boot ended without a recorded shutdown": nothing was written at its end. It can be a power loss, a reset, a freeze, or Azor ended without a chance to write; it is not proof of a crash, so do not call it one.
 - `sleep … resumed after N suspended`: measured from the boot clock, so the length is exact.
 - `INTR`: Azor itself ended without stopping while the system kept running. `stop` / "system shutting down": an orderly end.
-- `GAP` / "no data for …": Azor was not running for another reason, e.g. after a logout. `start`: Azor started.
+- `GAP` / "no data for …", with its cause in brackets: "Azor was stopped" (on purpose, e.g. at a logout), "did not measure" (Azor ran but got no turn: paused, the system stalled, or the clock was set forward), or "cause not recorded" (the first start, or data from a version before boots were tracked: it may have been a reboot or a suspend; it counts as unknown). `start`: Azor started.
 - `LOST` / "HISTORY NOT SAVED": data was measured but could not be written. Treat that time as unknown.
 - `SPACE`: history removed early to stay within `max_disk`. A removed day has only hourly summaries left; before a removed history point there is nothing. That is missing data, not a quiet period.
 - "journal coverage": the share of the range the system journal has entries for, from its list of boots. Error counts cover only that part. "SYSTEM JOURNAL NOT READABLE" means only the user's own services are counted. `azor health` also has `journal_access` and `journal_kept` (how far back the journal reaches, in steps); a problem there reaches the session line.
@@ -85,7 +87,7 @@ HH:MM means its latest past occurrence. Durations such as `24h` or `7d` count ba
 
 ### Desktop and services
 - A `desktop` event means a restart or end of the display server or a desktop part was seen; the cause is known only when the event names it.
-- After a logout, the desktop services of that user stop and systemd marks them failed. A list of failed desktop services right after "display server ended" is the logout, not a crash.
+- After a logout, the desktop services of that user stop and systemd marks them failed. A list of failed desktop services right after `desktop display server: ended` is the logout, not a crash.
 - Monitor refresh is the set mode, not the momentary rate; VRR is not known. On X11 the window manager is not seen.
 
 ### Devices

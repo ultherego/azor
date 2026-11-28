@@ -70,8 +70,11 @@ func startEvents(prev runInfo, known bool, boot string, now, last int64, gapAfte
 	ev := func(kind string, secs int64) {
 		out = append(out, Record{T: now, Type: "event", Kind: kind, Secs: secs})
 	}
+	stopped := func(secs int64) { // the cause of this gap is known
+		out = append(out, Record{T: now, Type: "event", Kind: "gap", Key: "stopped", Secs: secs})
+	}
 	switch {
-	case !known: // first start, or a version before sessions
+	case !known: // first start, or a version before sessions: cause unknown
 		if gap > gapAfter {
 			ev("gap", gap)
 		}
@@ -86,7 +89,7 @@ func startEvents(prev runInfo, known bool, boot string, now, last int64, gapAfte
 	case !prev.Stopped:
 		ev("interrupted", gap) // same boot, Azor ended without stopping
 	case gap > gapAfter:
-		ev("gap", gap) // Azor was stopped on purpose, e.g. at logout
+		stopped(gap) // Azor was stopped on purpose, e.g. at logout
 	}
 	ev("start", 0)
 	return

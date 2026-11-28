@@ -223,6 +223,13 @@ func parseRange(a, b string, now time.Time) (from, to time.Time, err error) {
 	if to, err = parseTime(b, now); err != nil {
 		return
 	}
+	// "12:00 15:00" at 14:43 asks about today until now, not about yesterday:
+	// a range under a day that reaches past now ends now.
+	if len(b) == 5 && b != "now" && len(a) == 5 {
+		if later := to.AddDate(0, 0, 1); from.Before(now) && later.After(now) && later.Sub(from) <= 24*time.Hour {
+			return from, now, nil
+		}
+	}
 	if to.Before(from) && len(a) == 5 { // 22:00 01:00 crosses midnight
 		from = from.AddDate(0, 0, -1)
 	}
@@ -319,7 +326,14 @@ func eventLine(r Record) string {
 	case "lost":
 		return fmt.Sprintf("%s  LOST   history not written for the previous %s", at, time.Duration(r.Secs)*time.Second)
 	case "gap":
-		return fmt.Sprintf("%s  GAP    no data for the previous %s (suspended, off or daemon stopped)", at, time.Duration(r.Secs)*time.Second)
+		why := "cause not recorded: suspended, off or Azor stopped"
+		switch r.Key {
+		case "stopped":
+			why = "Azor was stopped"
+		case "paused":
+			why = "Azor was running but did not measure: paused, the system stalled, or the clock was set forward"
+		}
+		return fmt.Sprintf("%s  GAP    no data for the previous %s (%s)", at, time.Duration(r.Secs)*time.Second, why)
 	case "space":
 		if r.New == "history" {
 			return fmt.Sprintf("%s  SPACE  long-term history before %s removed to stay within max_disk", at, r.Key)
@@ -459,12 +473,19 @@ func (g groupCover) describe(total float64) string {
 }
 
 // gapNames sorts the time without data by what the events say about it.
-var gapNames = map[string]string{"boot": "computer off", "suspend": "suspended", "interrupted": "Azor interrupted", "gap": "Azor not running", "lost": "not saved"}
+// A gap without a cause (a first start, or a version before sessions) stays
+// "unknown": it may have been a reboot or a suspend.
+var gapNames = map[string]string{"boot": "computer off", "suspend": "suspended", "interrupted": "Azor interrupted",
+	"gap stopped": "Azor not running", "gap paused": "Azor paused", "lost": "not saved"}
 
 type gapTimes map[string]float64
 
 func (g gapTimes) add(r Record, from, to time.Time) {
-	if name, ok := gapNames[r.Kind]; ok && r.Secs > 0 {
+	k := r.Kind
+	if k == "gap" {
+		k += " " + r.Key
+	}
+	if name, ok := gapNames[k]; ok && r.Secs > 0 {
 		g[name] += overlap(r.T, float64(r.Secs), from, to)
 	}
 }
@@ -472,7 +493,7 @@ func (g gapTimes) add(r Record, from, to time.Time) {
 func (g gapTimes) describe(total, recorded float64) string {
 	parts := []string{"recorded " + fmtSecs(int64(recorded))}
 	rest := total - recorded
-	for _, n := range []string{"suspended", "computer off", "Azor not running", "Azor interrupted", "not saved"} {
+	for _, n := range []string{"suspended", "computer off", "Azor not running", "Azor paused", "Azor interrupted", "not saved"} {
 		if v := min(g[n], max(rest, 0)); v >= 1 {
 			parts = append(parts, n+" "+fmtSecs(int64(v)))
 			rest -= v
@@ -491,10 +512,12 @@ func cmdRange(w io.Writer, args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("usage: azor range FROM TO")
 	}
-	from, to, err := parseRange(args[0], args[1], time.Now())
+	now := time.Now()
+	from, to, err := parseRange(args[0], args[1], now)
 	if err != nil {
 		return err
 	}
+	endsNow := to.Equal(now) && args[1] != "now"
 	cfg, _ := loadConfig()
 	const rows = 12
 	step := to.Sub(from) / rows
@@ -603,6 +626,9 @@ func cmdRange(w io.Writer, args []string) error {
 		return err
 	}
 	fmt.Fprintf(w, "Range %s - %s\n", from.Format("2006-01-02 15:04"), to.Format("2006-01-02 15:04"))
+	if endsNow {
+		fmt.Fprintf(w, "  note: %s is still ahead today, so the range ends now\n", args[1])
+	}
 	usedHourly := false
 	if all.n == 0 { // older than the day files: the hourly summaries
 		hourly := 0.0

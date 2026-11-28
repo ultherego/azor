@@ -112,6 +112,20 @@ func TestTimes(t *testing.T) {
 	if err != nil || to.Sub(f) != 3*time.Hour {
 		t.Fatal(f, to, err)
 	}
+	// a same-day range that reaches past now ends now, not yesterday
+	f, to, err = parseRange("09:00", "11:00", now)
+	if err != nil || !to.Equal(now) || f.Day() != 25 || f.Hour() != 9 {
+		t.Fatal("09:00 11:00 at 10:00:", f, to, err)
+	}
+	f, to, err = parseRange("11:00", "12:00", now) // wholly ahead today: yesterday
+	if err != nil || f.Day() != 24 || to.Sub(f) != time.Hour {
+		t.Fatal("11:00 12:00 at 10:00:", f, to, err)
+	}
+	late := time.Date(2026, 11, 25, 0, 30, 0, 0, time.Local)
+	f, to, err = parseRange("22:00", "01:00", late)
+	if err != nil || !to.Equal(late) || f.Day() != 24 || f.Hour() != 22 {
+		t.Fatal("22:00 01:00 at 00:30:", f, to, err)
+	}
 	f, to, err = parseRange("09:00", "now", now)
 	if err != nil || to.Sub(f) != time.Hour {
 		t.Fatal(f, to, err)
@@ -1349,7 +1363,11 @@ func TestParseSpan(t *testing.T) {
 func TestStartEvents(t *testing.T) {
 	kinds := func(rs []Record) (s []string) {
 		for _, r := range rs {
-			s = append(s, fmt.Sprintf("%s:%d", r.Kind, r.Secs))
+			k := r.Kind
+			if r.Key != "" {
+				k += "/" + r.Key
+			}
+			s = append(s, fmt.Sprintf("%s:%d", k, r.Secs))
 		}
 		return
 	}
@@ -1364,7 +1382,7 @@ func TestStartEvents(t *testing.T) {
 		{"first start", runInfo{}, false, "a", 0, "start:0"},
 		{"first start after an old version", runInfo{}, false, "a", 900, "gap:100 start:0"},
 		{"clean stop, quick start", runInfo{Boot: "a", Last: 990, Stopped: true}, true, "a", 990, "start:0"},
-		{"stopped at logout, back later", runInfo{Boot: "a", Last: 500, Stopped: true}, true, "a", 500, "gap:500 start:0"},
+		{"stopped at logout, back later", runInfo{Boot: "a", Last: 500, Stopped: true}, true, "a", 500, "gap/stopped:500 start:0"},
 		{"killed", runInfo{Boot: "a", Last: 980}, true, "a", 970, "interrupted:20 start:0"},
 		{"after a shutdown", runInfo{Boot: "a", Last: 400, Stopped: true, Shutdown: true}, true, "b", 400, "boot:600 start:0"},
 		{"after a power loss", runInfo{Boot: "a", Last: 400}, true, "b", 450, "unexpected_boot:0 boot:550 start:0"},
@@ -1529,5 +1547,24 @@ func TestJournalChecks(t *testing.T) {
 	}
 	if journalCoverage(time.Now().Add(-time.Hour), time.Now()) == "" {
 		t.Fatal("no coverage line")
+	}
+}
+
+func TestGapCauses(t *testing.T) {
+	from, to := time.Unix(0, 0), time.Unix(10000, 0)
+	g := gapTimes{}
+	g.add(Record{Kind: "gap", Key: "stopped", T: 2000, Secs: 1000}, from, to)
+	g.add(Record{Kind: "gap", Key: "paused", T: 4000, Secs: 1000}, from, to)
+	g.add(Record{Kind: "gap", T: 9000, Secs: 3000}, from, to) // cause not recorded
+	got := g.describe(10000, 5000)
+	for _, want := range []string{"Azor not running 16m40s", "Azor paused 16m40s", "unknown 50m0s"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q lacks %q", got, want)
+		}
+	}
+	for key, want := range map[string]string{"": "cause not recorded", "stopped": "Azor was stopped", "paused": "did not measure"} {
+		if l := eventLine(Record{Kind: "gap", Key: key, Secs: 60}); !strings.Contains(l, want) {
+			t.Fatal(l)
+		}
 	}
 }
