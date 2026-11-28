@@ -1214,3 +1214,30 @@ func TestMixedMemoryRecords(t *testing.T) {
 		t.Fatal(w.String())
 	}
 }
+
+func TestBootSummary(t *testing.T) {
+	text := "Startup finished in 21.300s (firmware) + 5.498s (loader) + 2.425s (kernel) + 4.751s (initrd) + 5min 44.999s (userspace) = 6min 18.975s \ngraphical.target reached after 7.008s in userspace.\n"
+	got, ok := bootSummary(text)
+	if !ok || got != "41s until graphical.target (all startup jobs: 6min 18.975s)" {
+		t.Fatal(got)
+	}
+	if got, _ := bootSummary("Startup finished in 1.2s (kernel) + 900ms (userspace) = 2.1s"); got != "2.1s" {
+		t.Fatal(got) // no target line: the total is all there is
+	}
+	if s := seconds("1h 2min 3.5s 250ms"); s < 3723.74 || s > 3723.76 {
+		t.Fatal(s)
+	}
+}
+
+func TestParseSpan(t *testing.T) {
+	for in, want := range map[string]time.Duration{"7d": 168 * time.Hour, "1d12h": 36 * time.Hour, "90m": 90 * time.Minute, "24h": 24 * time.Hour} {
+		if got, err := parseSpan(in); err != nil || got != want {
+			t.Error(in, got, err)
+		}
+	}
+	for _, bad := range []string{"xd", "d", "7x", ""} {
+		if _, err := parseSpan(bad); err == nil {
+			t.Error("accepted", bad)
+		}
+	}
+}

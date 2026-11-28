@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -232,11 +233,28 @@ func parseRange(a, b string, now time.Time) (from, to time.Time, err error) {
 	return
 }
 
+// parseSpan also takes whole days, which Go durations lack: "7d", "1d12h".
+func parseSpan(s string) (time.Duration, error) {
+	days := time.Duration(0)
+	if i := strings.Index(s, "d"); i > 0 {
+		n, err := strconv.Atoi(s[:i])
+		if err != nil {
+			return 0, err
+		}
+		days, s = time.Duration(n)*24*time.Hour, s[i+1:]
+		if s == "" {
+			return days, nil
+		}
+	}
+	d, err := time.ParseDuration(s)
+	return days + d, err
+}
+
 func since(args []string) (from, to time.Time, err error) {
 	d := 24 * time.Hour
 	if len(args) > 0 {
-		if d, err = time.ParseDuration(args[0]); err != nil || d <= 0 {
-			return from, to, fmt.Errorf("bad duration %q", args[0])
+		if d, err = parseSpan(args[0]); err != nil || d <= 0 {
+			return from, to, fmt.Errorf("bad duration %q (examples: 30m, 6h, 7d)", args[0])
 		}
 	}
 	to = time.Now()

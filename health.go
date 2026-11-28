@@ -304,12 +304,60 @@ func (h *health) bootTime() (string, bool) {
 		return v, true // cannot change until the next boot
 	}
 	s, ok := command("systemd-analyze", "time")
-	line, _, _ := strings.Cut(s, "\n")
-	i := strings.LastIndex(line, "= ")
-	if !ok || i < 0 {
+	if !ok {
+		return "", false // also while the boot is not finished yet
+	}
+	return bootSummary(s)
+}
+
+// bootSummary separates the time until the system is usable from the total,
+// which also counts jobs that start at boot and run long, such as a backup
+// catching up on a missed run.
+func bootSummary(text string) (string, bool) {
+	first, rest, _ := strings.Cut(text, "\n")
+	i := strings.LastIndex(first, "= ")
+	if i < 0 {
 		return "", false
 	}
-	return strings.TrimSpace(line[i+2:]), true
+	total := strings.TrimSpace(first[i+2:])
+	var before float64 // firmware, loader, kernel and initrd
+	for _, part := range strings.Split(first[:i], "+") {
+		if p := strings.TrimSpace(part); p != "" && !strings.Contains(p, "(userspace)") {
+			d, _, _ := strings.Cut(p, " (")
+			before += seconds(d)
+		}
+	}
+	for _, l := range strings.Split(rest, "\n") {
+		target, after, ok := strings.Cut(l, " reached after ")
+		if !ok {
+			continue
+		}
+		d, _, _ := strings.Cut(after, " in userspace")
+		ready := before + seconds(d)
+		if ready <= 0 {
+			break
+		}
+		return fmt.Sprintf("%.0fs until %s (all startup jobs: %s)", ready, strings.TrimSpace(target), total), true
+	}
+	return total, true
+}
+
+// seconds reads systemd durations such as "5min 44.999s", "498ms" or "1h 2min".
+func seconds(d string) (sum float64) {
+	for _, f := range strings.Fields(d) {
+		for _, u := range []struct {
+			suffix string
+			mult   float64
+		}{{"ms", 0.001}, {"us", 1e-6}, {"min", 60}, {"h", 3600}, {"s", 1}} {
+			if v, ok := strings.CutSuffix(f, u.suffix); ok {
+				if n, err := strconv.ParseFloat(v, 64); err == nil {
+					sum += n * u.mult
+				}
+				break
+			}
+		}
+	}
+	return
 }
 
 func (h *health) uptime() float64 {
