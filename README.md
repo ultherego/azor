@@ -68,17 +68,21 @@ See [SECURITY.md](SECURITY.md): what Azor never reads, how names are made safe f
 ## How it works
 
 1. **Record** – a small background service reads the sensors every 2 seconds and stores the average and the peak every 10 seconds.
-2. **Keep** – the data stays on your computer, in `~/.local/state/azor`, for 7 days.
+2. **Keep** – the data stays on your computer, in `~/.local/state/azor`: every sample for 7 days, then hourly summaries for 30 days and daily ones for 90 days. When an alert starts, Azor also takes a snapshot of who was busy. Reboots, shutdowns, suspends and interruptions are told apart, so a gap in the data has a reason.
 3. **Tell** – when a Claude Code session starts, the hook gives Claude one line with the current state.
 4. **Ask** – when you ask what happened, Claude runs `azor` to read the history. You can do the same:
 
 ```sh
 azor                      # now
 azor range 12:00 15:00    # what happened between 12:00 and 15:00
-azor events               # alerts and changes
+azor events               # alerts, changes, boots, suspends
+azor snapshot latest      # who was busy when the last alert started
+azor compare update       # before and after the last update
+azor problems             # what keeps coming back (30 days)
 azor desktop              # detected desktop, displays and restarts
 azor health               # problems such as a needed reboot
-azor timers               # backups, snapshots and other scheduled jobs
+azor timers               # backups and other scheduled jobs, with 30-day runs
+azor json now             # the same views as JSON, for scripts and agents
 ```
 
 Keys, passwords, the clipboard, browsers and shell history are off limits, even if you list them in the configuration. The service runs without root and without internet access, and can write only its own data.

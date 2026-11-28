@@ -16,7 +16,7 @@ import (
 
 // moduleNames lists everything Azor can collect. All are on by default.
 var moduleNames = []string{"cpu", "memory", "gpu", "disks", "network", "fans", "battery", "pressure",
-	"processes", "services", "timers", "filesystem", "health", "desktop", "facts", "files", "journal", "packages"}
+	"processes", "services", "timers", "filesystem", "health", "desktop", "snapshots", "devices", "facts", "files", "journal", "packages"}
 
 // rates turns growing counters into values per second.
 type rates struct {

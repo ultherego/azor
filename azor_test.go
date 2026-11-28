@@ -1241,3 +1241,51 @@ func TestParseSpan(t *testing.T) {
 		}
 	}
 }
+
+func TestStartEvents(t *testing.T) {
+	kinds := func(rs []Record) (s []string) {
+		for _, r := range rs {
+			s = append(s, fmt.Sprintf("%s:%d", r.Kind, r.Secs))
+		}
+		return
+	}
+	cases := []struct {
+		name  string
+		prev  runInfo
+		known bool
+		boot  string
+		last  int64
+		want  string
+	}{
+		{"first start", runInfo{}, false, "a", 0, "start:0"},
+		{"first start after an old version", runInfo{}, false, "a", 900, "gap:100 start:0"},
+		{"clean stop, quick start", runInfo{Boot: "a", Last: 990, Stopped: true}, true, "a", 990, "start:0"},
+		{"stopped at logout, back later", runInfo{Boot: "a", Last: 500, Stopped: true}, true, "a", 500, "gap:500 start:0"},
+		{"killed", runInfo{Boot: "a", Last: 980}, true, "a", 970, "interrupted:20 start:0"},
+		{"after a shutdown", runInfo{Boot: "a", Last: 400, Stopped: true, Shutdown: true}, true, "b", 400, "boot:600 start:0"},
+		{"after a power loss", runInfo{Boot: "a", Last: 400}, true, "b", 450, "unexpected_boot:0 boot:550 start:0"},
+	}
+	for _, c := range cases {
+		if got := strings.Join(kinds(startEvents(c.prev, c.known, c.boot, 1000, c.last, 45)), " "); got != c.want {
+			t.Errorf("%s: %s, want %s", c.name, got, c.want)
+		}
+	}
+}
+
+func TestSleepWatch(t *testing.T) {
+	d := t.TempDir()
+	t.Setenv("AZOR_TEST_PROC", d)
+	os.WriteFile(filepath.Join(d, "uptime"), []byte("100.0 1"), 0o600)
+	w := newSleepWatch()
+	if s := w.slept(); s != 0 {
+		t.Fatal("no time passed", s)
+	}
+	os.WriteFile(filepath.Join(d, "uptime"), []byte("400.0 1"), 0o600)
+	if s := w.slept(); s < 299*time.Second || s > 300*time.Second {
+		t.Fatal(s)
+	}
+	os.WriteFile(filepath.Join(d, "uptime"), []byte("401.0 1"), 0o600) // jitter, not a suspend
+	if s := w.slept(); s != 0 {
+		t.Fatal(s)
+	}
+}

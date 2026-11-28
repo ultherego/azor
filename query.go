@@ -347,6 +347,28 @@ func eventLine(r Record) string {
 		return fmt.Sprintf("%s  pkg    %s: %s", at, r.Key, r.New)
 	case "start":
 		return at + "  start  daemon started"
+	case "stop":
+		return at + "  stop   daemon stopped"
+	case "usb":
+		if r.New == "" {
+			return fmt.Sprintf("%s  usb    %s disconnected", at, r.Key)
+		}
+		if r.Old == "" {
+			return fmt.Sprintf("%s  usb    %s connected", at, r.Key)
+		}
+		return fmt.Sprintf("%s  usb    %s: %s -> %s devices", at, r.Key, r.Old, r.New)
+	case "link":
+		return fmt.Sprintf("%s  link   %s: %s -> %s", at, r.Key, orNone(r.Old), orNone(r.New))
+	case "shutdown":
+		return at + "  stop   system shutting down"
+	case "boot":
+		return fmt.Sprintf("%s  BOOT   new boot; no data for the previous %s", at, fmtSecs(r.Secs))
+	case "unexpected_boot":
+		return at + "  BOOT   the previous boot ended without a recorded shutdown (power loss, reset, freeze, or Azor stopped without writing)"
+	case "interrupted":
+		return fmt.Sprintf("%s  INTR   Azor ended without stopping; no data for the previous %s", at, fmtSecs(r.Secs))
+	case "suspend":
+		return fmt.Sprintf("%s  sleep  resumed after %s suspended", at, fmtSecs(r.Secs))
 	}
 	return at + "  " + r.Kind
 }
@@ -380,6 +402,73 @@ func overlap(end int64, secs float64, from, to time.Time) float64 {
 	return max(0, b-a)
 }
 
+// groupCover tells, per group of sensors, how much of the recorded time has
+// data: a missing GPU or disk reading is not the same as no load.
+type groupCover map[string]float64
+
+var coverGroups = []struct {
+	name string
+	has  func(map[string]float64) bool
+}{
+	{"CPU", func(m map[string]float64) bool { _, ok := m["cpu"]; return ok }},
+	{"memory", func(m map[string]float64) bool { _, ok := m["mem"]; return ok }},
+	{"GPU", func(m map[string]float64) bool { _, ok := m["gpu"]; return ok }},
+	{"temperatures", func(m map[string]float64) bool { _, ok := m["cpu_temp"]; return ok }},
+	{"disks", func(m map[string]float64) bool {
+		for k := range m {
+			if strings.HasPrefix(k, "disk.") {
+				return true
+			}
+		}
+		return false
+	}},
+	{"network", func(m map[string]float64) bool { _, ok := m["net_down"]; return ok }},
+}
+
+func (g groupCover) add(r Record, secs float64) {
+	for _, c := range coverGroups {
+		if c.has(r.Avg) {
+			g[c.name] += secs
+		}
+	}
+}
+
+func (g groupCover) describe(total float64) string {
+	var out []string
+	for _, c := range coverGroups {
+		if total > 0 {
+			out = append(out, fmt.Sprintf("%s %.0f%%", c.name, min(100, g[c.name]/total*100)))
+		}
+	}
+	return strings.Join(out, ", ")
+}
+
+// gapNames sorts the time without data by what the events say about it.
+var gapNames = map[string]string{"boot": "computer off", "suspend": "suspended", "interrupted": "Azor interrupted", "gap": "Azor not running", "lost": "not saved"}
+
+type gapTimes map[string]float64
+
+func (g gapTimes) add(r Record, from, to time.Time) {
+	if name, ok := gapNames[r.Kind]; ok && r.Secs > 0 {
+		g[name] += overlap(r.T, float64(r.Secs), from, to)
+	}
+}
+
+func (g gapTimes) describe(total, recorded float64) string {
+	parts := []string{"recorded " + fmtSecs(int64(recorded))}
+	rest := total - recorded
+	for _, n := range []string{"suspended", "computer off", "Azor not running", "Azor interrupted", "not saved"} {
+		if v := min(g[n], max(rest, 0)); v >= 1 {
+			parts = append(parts, n+" "+fmtSecs(int64(v)))
+			rest -= v
+		}
+	}
+	if rest >= 60 {
+		parts = append(parts, "unknown "+fmtSecs(int64(rest)))
+	}
+	return strings.Join(parts, ", ")
+}
+
 func cmdRange(w io.Writer, args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("usage: azor range FROM TO")
@@ -395,6 +484,8 @@ func cmdRange(w io.Writer, args []string) error {
 	var events []Record
 	svcs, peaks := map[string][2]float64{}, map[string]proc{}
 	var mixedMem, newerMem bool
+	groups, gaps := groupCover{}, gapTimes{}
+	var snaps []Record
 	sp := &spans{fallback: cfg.Interval.Seconds()}
 	var covered float64
 	var guessed, wider int
@@ -413,6 +504,7 @@ func cmdRange(w io.Writer, args []string) error {
 				return
 			}
 			covered += part
+			groups.add(r, part)
 			if !sure {
 				guessed++
 			}
@@ -434,9 +526,12 @@ func cmdRange(w io.Writer, args []string) error {
 			}
 		case "event":
 			events = append(events, r)
-			if r.Kind == "gap" || r.Kind == "start" || r.Kind == "lost" {
+			if r.Kind == "gap" || r.Kind == "start" || r.Kind == "lost" || r.Kind == "boot" || r.Kind == "interrupted" || r.Kind == "suspend" {
 				sp.cut()
 			}
+			gaps.add(r, from, to)
+		case "snapshot":
+			snaps = append(snaps, r)
 		case "procs":
 			for _, p := range r.CPU {
 				cpu[p.Name] = max(cpu[p.Name], p.CPU)
@@ -490,11 +585,33 @@ func cmdRange(w io.Writer, args []string) error {
 		return err
 	}
 	fmt.Fprintf(w, "Range %s - %s\n", from.Format("2006-01-02 15:04"), to.Format("2006-01-02 15:04"))
+	usedHourly := false
+	if all.n == 0 { // older than the day files: the hourly summaries
+		hourly := 0.0
+		loadLong(dataDir(), from, to.Add(time.Hour), func(r Record) {
+			if r.Type == "hour" {
+				if part := overlap(r.T, 3600, from, to); part > 0 && r.Secs > 0 {
+					w := float64(r.Secs) * part / 3600
+					all.add(r, w)
+					hourly += w
+				}
+			}
+		})
+		covered = hourly
+		usedHourly = all.n > 0
+		if usedHourly {
+			fmt.Fprintf(w, "From hourly summaries (older than the day files): about %.0f%% of the range covered; averages are weighted by time, peaks are the highest reads of each hour.\n", min(covered/to.Sub(from).Seconds()*100, 100))
+			all.print(w)
+		}
+	}
 	if all.n == 0 {
 		fmt.Fprintln(w, "No samples in this range.")
+	} else if usedHourly { // already printed above
 	} else {
 		pct := covered / to.Sub(from).Seconds() * 100
 		fmt.Fprintf(w, "%d samples, about %.0f%% of the range covered (averages weighted by time)\n", all.n, min(pct, 100))
+		fmt.Fprintln(w, "  time:", gaps.describe(to.Sub(from).Seconds(), covered))
+		fmt.Fprintln(w, "  data per group (share of the recorded time):", groups.describe(covered))
 		if guessed > 0 {
 			fmt.Fprintf(w, "  note: %d older samples do not record their length; their coverage is estimated\n", guessed)
 		}
@@ -543,6 +660,9 @@ func cmdRange(w io.Writer, args []string) error {
 	}
 	for _, k := range sortedKeys(fs) {
 		fmt.Fprintf(w, "Filesystem %s: %.1f -> %.1f %% used\n", describe(k).label, fs[k][0], fs[k][1])
+	}
+	for _, r := range snaps {
+		fmt.Fprintf(w, "Snapshot %s: %s (azor snapshot %s)\n", time.Unix(r.T, 0).Format("01-02 15:04:05"), r.Key, time.Unix(r.T, 0).Format("15:04"))
 	}
 	fmt.Fprintln(w, "Events:")
 	for _, e := range events {
@@ -779,7 +899,14 @@ func cmdStatus(w io.Writer) error {
 			live += " (STALE)"
 		}
 	}
-	fmt.Fprintf(w, "daemon: %s\ndata: %s, %d day files, %.1f MB, retention %d days\n", live, dataDir(), len(fs), float64(size)/1e6, cfg.Retention)
+	long := int64(0)
+	if i, err := os.Stat(filepath.Join(dataDir(), historyFile)); err == nil {
+		long = i.Size()
+	}
+	fmt.Fprintf(w, "daemon: %s\ndata: %s, %d day files, %.1f MB, retention %d days; long-term history %.1f MB (hourly %d days, daily %d days)\n", live, dataDir(), len(fs), float64(size)/1e6, cfg.Retention, float64(long)/1e6, keepHours, keepDays)
+	if size+long > 500e6 {
+		fmt.Fprintln(w, "WARNING: the history is larger than 500 MB; lower the retention in azor.conf")
+	}
 	var st State
 	if b, err := os.ReadFile(stateFile()); err == nil && json.Unmarshal(b, &st) == nil {
 		st.clean()
@@ -902,7 +1029,7 @@ func brief(s State, now time.Time, events func(time.Time, func(Record)) error) s
 	}
 	last, count := map[string]Record{}, map[string]int{}
 	if err := events(now, func(r Record) {
-		if r.Type != "event" || r.Kind == "start" || r.Kind == "clear" {
+		if r.Type != "event" || r.Kind == "start" || r.Kind == "clear" || r.Kind == "stop" || r.Kind == "shutdown" {
 			return
 		}
 		k := r.Kind + " " + r.Key
@@ -1004,6 +1131,14 @@ func briefEvent(r Record, now time.Time) string {
 		return fmt.Sprintf("%s no data for %s before", at, time.Duration(r.Secs)*time.Second)
 	case "lost":
 		return fmt.Sprintf("%s HISTORY LOST for %s before (could not write)", at, time.Duration(r.Secs)*time.Second)
+	case "boot":
+		return fmt.Sprintf("%s new boot (off or no data for %s)", at, fmtSecs(r.Secs))
+	case "unexpected_boot":
+		return at + " previous boot ended without a recorded shutdown"
+	case "interrupted":
+		return fmt.Sprintf("%s Azor was interrupted (no data for %s)", at, fmtSecs(r.Secs))
+	case "suspend":
+		return fmt.Sprintf("%s resumed after %s suspended", at, fmtSecs(r.Secs))
 	case "unit":
 		if r.New == "" {
 			return at + " " + cut(r.Key) + " recovered"
@@ -1011,6 +1146,13 @@ func briefEvent(r Record, now time.Time) string {
 		return at + " " + cut(r.Key) + " FAILED"
 	case "desktop":
 		return fmt.Sprintf("%s %s %s", at, cut(r.Key), cut(r.New))
+	case "usb":
+		if r.New == "" {
+			return at + " USB " + cut(r.Key) + " disconnected"
+		}
+		return at + " USB " + cut(r.Key) + " connected"
+	case "link":
+		return fmt.Sprintf("%s network %s %s -> %s", at, cut(r.Key), cut(r.Old), cut(r.New))
 	case "package":
 		return fmt.Sprintf("%s packages %s", at, cut(r.Key))
 	}

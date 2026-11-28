@@ -19,6 +19,13 @@ Usage:
   azor brief                one short line (for hooks)
   azor hardware             detected sensors and alert limits
   azor desktop             detected desktop, displays and its parts
+  azor snapshots [SPAN]     snapshots taken when alerts started
+  azor snapshot latest|N|HH:MM  one snapshot in detail
+  azor compare update|boots  before/after the last update, or the last two boots
+  azor compare FROM1 TO1 FROM2 TO2  any two ranges
+  azor problems [SPAN]      what keeps coming back (default 30d)
+  azor json now|events|snapshots|timers|health  the same as JSON, for programs
+  azor export [SPAN]        raw records as JSON lines (review before sharing)
   azor health              detected health checks and problems
   azor timers               scheduled jobs and their last result
   azor init                 create ~/.config/azor/azor.conf
@@ -76,6 +83,16 @@ func main() {
 		err = cmdDesktop(os.Stdout)
 	case "health":
 		err = cmdHealth(os.Stdout)
+	case "snapshots", "snapshot":
+		err = cmdSnapshots(os.Stdout, os.Args[2:])
+	case "compare":
+		err = cmdCompare(os.Stdout, os.Args[2:])
+	case "problems":
+		err = cmdProblems(os.Stdout, os.Args[2:])
+	case "json":
+		err = cmdJSON(os.Stdout, os.Args[2:])
+	case "export":
+		err = cmdExport(os.Stdout, os.Args[2:])
 	case "timers":
 		err = cmdTimers(os.Stdout)
 	case "init":

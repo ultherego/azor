@@ -249,13 +249,21 @@ func runDaemon() error {
 		lastSaved = r.T
 	}
 	now := time.Now()
-	prune(dir, now, cfg.Retention)
+	if err := compact(dir, now, cfg.Retention, cfg.Interval.Seconds()); err != nil {
+		fmt.Fprintln(os.Stderr, "azor: long-term history:", err)
+	} else {
+		prune(dir, now, cfg.Retention) // a day file is removed only once it is summed up
+	}
 	last := lastSample(dir, now)
 	lastSaved = last
-	if last > 0 && now.Unix()-last > int64(gapAfter.Seconds()) {
-		store(Record{T: now.Unix(), Type: "event", Kind: "gap", Secs: now.Unix() - last})
+	prev, known := loadSession(dir)
+	cur := runInfo{Boot: bootID(), Start: now.Unix(), Last: now.Unix()}
+	for _, e := range startEvents(prev, known, cur.Boot, now.Unix(), last, int64(gapAfter.Seconds())) {
+		store(e)
 	}
-	store(Record{T: now.Unix(), Type: "event", Kind: "start"})
+	saveSession(dir, cur)
+	sleep := newSleepWatch()
+	snaps := &snapshots{}
 
 	s, ps, a := newSensors(cfg, ""), &procScan{}, newAgg()
 	al := alerts{makeRules(cfg, s.crit), map[string]*alert{}}
@@ -271,7 +279,7 @@ func runDaemon() error {
 	sys.scan(systemCgroup, 0)
 	// slow watches settings, services and declared files for changes.
 	seen := map[string]map[string]string{}
-	runs, lastRun, logged := map[string]run{}, map[string]int64{}, map[string]int64{}
+	runs, lastRun, logged, runDur := map[string]run{}, map[string]int64{}, map[string]int64{}, map[string]int64{}
 	change := func(kind string, cur map[string]string, t time.Time) {
 		old, known := seen[kind]
 		if cur == nil {
@@ -284,7 +292,7 @@ func runDaemon() error {
 		for _, k := range diff(old, cur) {
 			e := Record{T: t.Unix(), Type: "event", Kind: kind, Key: short(k)}
 			if kind == "timer" {
-				e.Val = float64(lastRun[k]) // which run the result belongs to
+				e.Val, e.Secs = float64(lastRun[k]), runDur[k] // which run the result belongs to
 			}
 			if kind != "file" {
 				e.Old, e.New = old[k], cur[k]
@@ -331,23 +339,26 @@ func runDaemon() error {
 				for _, x := range ts { // the run each result belongs to
 					if s, ok := timerStates([]timer{x})[timerKey(x)]; ok {
 						runs[timerKey(x)] = run{s, x.Last}
-						lastRun[timerKey(x)] = x.Last
+						lastRun[timerKey(x)], runDur[timerKey(x)] = x.Last, x.Dur
 					}
 				}
+				before := seen["timer"]
 				change("timer", cur, t)
+				for k, r := range runs { // every new run is kept, also with the same result
+					if logged[k] != r.Last && before[k] == r.State {
+						store(Record{T: t.Unix(), Type: "event", Kind: "timer", Key: k, Old: r.State, New: r.State, Val: float64(r.Last), Secs: runDur[k]})
+					}
+					logged[k] = r.Last
+				}
 				unknownSave = nil
 				if err := saveRuns(dir, runs); err != nil {
 					unknownSave = []string{"timer results not saved (" + err.Error() + ")"}
-					for k, r := range runs { // the history keeps every run then, also a repeated result
-						if logged[k] != r.Last {
-							store(Record{T: t.Unix(), Type: "event", Kind: "timer", Key: k, Old: r.State, New: r.State, Val: float64(r.Last)})
-						}
-					}
-				}
-				for k, r := range runs {
-					logged[k] = r.Last
 				}
 			}
+		}
+		if cfg.on("devices") {
+			change("usb", usbDevices(""), t)
+			change("link", netLinks(""), t)
 		}
 		if u, complete := watchedUnits(cfg.WatchUnits); u != nil {
 			if !complete { // a unit that could not be read keeps its last state
@@ -471,13 +482,26 @@ func runDaemon() error {
 		select {
 		case <-stop:
 			os.Remove(stateFile())
+			cur.Last, cur.Stopped, cur.Shutdown = time.Now().Unix(), true, shuttingDown()
+			kind := "stop"
+			if cur.Shutdown {
+				kind = "shutdown"
+			}
+			store(Record{T: cur.Last, Type: "event", Kind: kind})
+			saveSession(dir, cur)
 			return nil
 		case <-tk.C:
 		}
 		// Round(0) drops the monotonic clock, which stops during suspend.
 		now = time.Now().Round(0)
-		if d := now.Sub(lastTick.Round(0)); d > gapAfter {
-			store(Record{T: now.Unix(), Type: "event", Kind: "gap", Secs: int64(d.Seconds())})
+		slept := sleep.slept()
+		if slept > 0 { // the boot clock went on while the monotonic one stood still
+			store(Record{T: now.Unix(), Type: "event", Kind: "suspend", Secs: int64(slept.Round(time.Second).Seconds())})
+		}
+		if d := now.Sub(lastTick.Round(0)); d > gapAfter || slept > 0 {
+			if slept == 0 || d-slept > gapAfter { // a pause the suspend does not explain
+				store(Record{T: now.Unix(), Type: "event", Kind: "gap", Secs: int64((d - slept).Seconds())})
+			}
 			a, lastFlush, lastProc = newAgg(), now, now
 			s.discover()
 			s.cpuBusy()
@@ -497,8 +521,18 @@ func runDaemon() error {
 		avg, max := a.result()
 		a = newAgg()
 		store(Record{T: now.Unix(), Type: "sample", Avg: avg, Max: max, Secs: int64(span.Round(time.Second).Seconds())})
+		var fired []string
 		for _, e := range al.update(now.Unix(), avg, withMax(avg, max)) {
 			store(e)
+			if e.Kind == "alert" {
+				fired = append(fired, e.Key)
+			}
+		}
+		if cfg.on("snapshots") {
+			if why, ok := snaps.due(now, fired); ok {
+				st.Values = avg
+				store(takeSnapshot(now, why, st, cfg.on("processes")))
+			}
 		}
 		if d := now.Sub(lastProc.Round(0)); d >= cfg.ProcInterval-cfg.Sample {
 			lastProc = now
@@ -525,6 +559,8 @@ func runDaemon() error {
 				}
 			}
 			slow(now)
+			cur.Last = now.Unix() // so that the next start knows how far this run got
+			saveSession(dir, cur)
 		}
 		st.T, st.Values, st.Alerts = now.Unix(), avg, nil
 		for _, r := range al.rules {
@@ -538,7 +574,11 @@ func runDaemon() error {
 		}
 		if now.YearDay() != day {
 			day = now.YearDay()
-			prune(dir, now, cfg.Retention)
+			if err := compact(dir, now, cfg.Retention, cfg.Interval.Seconds()); err != nil {
+				fmt.Fprintln(os.Stderr, "azor: long-term history:", err)
+			} else {
+				prune(dir, now, cfg.Retention)
+			}
 		}
 	}
 }

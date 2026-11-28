@@ -22,6 +22,7 @@ type Record struct {
 	MemDef   int                `json:"mem,omitempty"` // 2: service RAM without file cache
 	Avg      map[string]float64 `json:"avg,omitempty"`
 	Max      map[string]float64 `json:"max,omitempty"`
+	Min      map[string]float64 `json:"min,omitempty"`
 	CPU      []proc             `json:"top_cpu,omitempty"`
 	Mem      []proc             `json:"top_mem,omitempty"`
 	Watch    []proc             `json:"watch,omitempty"`
@@ -31,7 +32,7 @@ type Record struct {
 	Facts    map[string]string  `json:"facts,omitempty"`
 	Old      string             `json:"old,omitempty"`
 	New      string             `json:"new,omitempty"`
-	Kind     string             `json:"kind,omitempty"` // event: alert, clear, gap, start
+	Kind     string             `json:"kind,omitempty"` // event: alert, clear, gap, start, stop, shutdown, boot, unexpected_boot, interrupted, suspend, lost, ...
 	Key      string             `json:"key,omitempty"`
 	Val      float64            `json:"val,omitempty"`
 	Secs     int64              `json:"secs,omitempty"`

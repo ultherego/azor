@@ -206,6 +206,32 @@ func knownRuns(dir string, now time.Time, days int) map[string]run {
 	return m
 }
 
+type runStat struct{ runs, failed int }
+
+// runHistory counts the runs Azor saw per timer, each run once.
+func runHistory(dir string, from, to time.Time) map[string]runStat {
+	seen, out := map[string]map[float64]bool{}, map[string]runStat{}
+	loadAll(dir, from, to, func(r Record) {
+		if r.Type != "event" || r.Kind != "timer" || r.Val <= 0 || r.New == "" {
+			return
+		}
+		if seen[r.Key] == nil {
+			seen[r.Key] = map[float64]bool{}
+		}
+		if seen[r.Key][r.Val] {
+			return
+		}
+		seen[r.Key][r.Val] = true
+		s := out[r.Key]
+		s.runs++
+		if strings.HasPrefix(r.New, "failed") {
+			s.failed++
+		}
+		out[r.Key] = s
+	})
+	return out
+}
+
 func timerKey(t timer) string {
 	if t.User {
 		return "user " + t.Name
@@ -384,7 +410,8 @@ func cmdTimers(w io.Writer) error {
 		}
 		return time.Unix(t, 0).Format("01-02 15:04")
 	}
-	fmt.Fprintf(w, "  %-34s %-6s %-12s %-12s %6s  %s\n", "timer", "scope", "last", "next", "took", "result")
+	hist := runHistory(dataDir(), time.Now().AddDate(0, 0, -30), time.Now())
+	fmt.Fprintf(w, "  %-34s %-6s %-12s %-12s %6s  %-16s %s\n", "timer", "scope", "last", "next", "took", "30 days", "result")
 	for _, t := range ts {
 		scope, res := "system", t.Result
 		if t.User {
@@ -411,7 +438,12 @@ func cmdTimers(w io.Writer) error {
 		if t.failed() {
 			res = "FAILED: " + res
 		}
-		fmt.Fprintf(w, "  %-34s %-6s %-12s %-12s %5ds  %s\n", clean(t.Name), scope, at(t.Last), at(t.Next), t.Dur, clean(res))
+		h := hist[timerKey(t)]
+		stat := "-"
+		if h.runs > 0 {
+			stat = fmt.Sprintf("%d run%s, %d failed", h.runs, map[bool]string{true: "", false: "s"}[h.runs == 1], h.failed)
+		}
+		fmt.Fprintf(w, "  %-34s %-6s %-12s %-12s %5ds  %-16s %s\n", clean(t.Name), scope, at(t.Last), at(t.Next), t.Dur, stat, clean(res))
 	}
 	return nil
 }
