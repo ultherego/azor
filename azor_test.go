@@ -1634,3 +1634,23 @@ func TestInstallSkill(t *testing.T) {
 		t.Fatal("front matter check too loose")
 	}
 }
+
+func TestCompareIdleNote(t *testing.T) {
+	mk := func(quiet float64) period {
+		p := period{from: time.Unix(0, 0), to: time.Unix(7200, 0), secs: 7200, quiet: quiet, all: newSpan(7200), calm: newSpan(7200)}
+		r := Record{Avg: map[string]float64{"cpu": 5, "cpu_temp": 40}}
+		p.all.add(r, 7200)
+		p.calm.add(r, quiet)
+		return p
+	}
+	var b bytes.Buffer
+	printCompare(&b, "t", mk(7200), mk(60))
+	if !strings.Contains(b.String(), "need 10 minutes of idle data") {
+		t.Fatal(b.String())
+	}
+	b.Reset()
+	printCompare(&b, "t", mk(7200), mk(3600))
+	if strings.Contains(b.String(), "need 10 minutes") || !strings.Contains(b.String(), "40.0        40.0") {
+		t.Fatal(b.String())
+	}
+}

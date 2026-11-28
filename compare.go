@@ -95,6 +95,9 @@ func printCompare(w io.Writer, title string, a, b period) {
 	if a.secs < 3600 || b.secs < 3600 {
 		fmt.Fprintln(w, "  note: less than an hour of data on one side; differences may be chance")
 	}
+	if a.quiet < 600 || b.quiet < 600 {
+		fmt.Fprintln(w, "  note: the idle columns need 10 minutes of idle data on each side; shown as -")
+	}
 	fmt.Fprintf(w, "  %-28s %21s %23s\n", "metric (average)", "all time", "idle only")
 	fmt.Fprintf(w, "  %-28s %10s %10s %11s %11s\n", "", "before", "after", "before", "after")
 	for _, k := range compareKeys {
