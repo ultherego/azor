@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -198,6 +199,18 @@ func (h *health) list() []check {
 				}
 				return ""
 			}},
+		{name: "journal_access", slow: true, state: h.journalAccess, problem: func(_ float64, s string) string {
+			if s != "readable" {
+				return "system journal not readable: journal error counts cover only your own services"
+			}
+			return ""
+		}},
+		{name: "journal_kept", slow: true, state: h.journalKept, problem: func(_ float64, s string) string {
+			if s == "under 1 day" {
+				return "the journal keeps under 1 day: older errors cannot be counted"
+			}
+			return ""
+		}},
 		{name: "power_profile", slow: true, state: powerProfile},
 		{name: "boot_time", slow: true, state: h.bootTime},
 	}
@@ -524,4 +537,53 @@ func cmdHealth(w io.Writer) error {
 		fmt.Fprintln(w, "No problems found by these checks.")
 	}
 	return nil
+}
+
+// journalAccess checks the access rights of the system journal; nothing is
+// opened. Without a machine id or a journal file it is not available.
+func (h *health) journalAccess() (string, bool) {
+	id := strings.TrimSpace(readStr(h.root + "/etc/machine-id"))
+	if id == "" || strings.ContainsAny(id, "/.") {
+		return "", false
+	}
+	for _, d := range []string{"/var/log/journal", "/run/log/journal"} {
+		p := filepath.Join(h.root+d, id, "system.journal")
+		if _, err := os.Stat(p); err == nil {
+			if syscall.Access(p, 4) == nil { // R_OK
+				return "readable", true
+			}
+			return "only own entries", true
+		}
+	}
+	return "", false
+}
+
+// journalKept tells how far back the journal reaches, in coarse steps so that
+// rotation does not make an event each time. It uses the list of boots, which
+// holds no log messages.
+func (h *health) journalKept() (string, bool) {
+	if h.root != "" {
+		return "", false
+	}
+	out, ok := command("journalctl", "-q", "--no-pager", "--list-boots", "-o", "json")
+	if !ok {
+		return "", false
+	}
+	_, oldest, ok := bootCover([]byte(out), time.Time{}, time.Time{})
+	if !ok {
+		return "", false
+	}
+	return keptStep(time.Since(oldest)), true
+}
+
+func keptStep(d time.Duration) string {
+	switch {
+	case d < 24*time.Hour:
+		return "under 1 day"
+	case d < 7*24*time.Hour:
+		return "1 to 7 days"
+	case d < 30*24*time.Hour:
+		return "7 to 30 days"
+	}
+	return "over 30 days"
 }

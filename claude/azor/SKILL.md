@@ -25,7 +25,7 @@ Azor is a small daemon that records the computer's state every few seconds, also
 | what this computer can measure | `azor hardware` |
 | is Azor itself working | `azor status`, `systemctl --user status azor` |
 
-HH:MM means its latest past occurrence. Durations such as `24h` or `7d` count back from now. Every sample is kept for the retention (7 days by default); older periods have hourly summaries for 30 days and daily ones for 90 days, which `azor range` uses when no samples are left, and say so.
+HH:MM means its latest past occurrence. Durations such as `24h` or `7d` count back from now. Every sample is kept for the retention (7 days by default); older periods have hourly summaries for 30 days and daily ones for 90 days, which `azor range` uses when no samples are left, and say so. All history stays under `max_disk` (200 MB by default); when it would not, the oldest days lose their samples early and, if still needed, the oldest summaries go.
 
 ## Method
 
@@ -45,6 +45,8 @@ HH:MM means its latest past occurrence. Durations such as `24h` or `7d` count ba
 - `INTR`: Azor itself ended without stopping while the system kept running. `stop` / "system shutting down": an orderly end.
 - `GAP` / "no data for …": Azor was not running for another reason, e.g. after a logout. `start`: Azor started.
 - `LOST` / "HISTORY NOT SAVED": data was measured but could not be written. Treat that time as unknown.
+- `SPACE`: history removed early to stay within `max_disk`. A removed day has only hourly summaries left; before a removed history point there is nothing. That is missing data, not a quiet period.
+- "journal coverage": the share of the range the system journal has entries for, from its list of boots. Error counts cover only that part. "SYSTEM JOURNAL NOT READABLE" means only the user's own services are counted. `azor health` also has `journal_access` and `journal_kept` (how far back the journal reaches, in steps); a problem there reaches the session line.
 - "unknown now" for a source (system services, timers, watched units): it could not be read; the last known state is kept and marked. Never report unknown as healthy.
 - A metric that is missing means no readable sensor, not zero. `azor health` lists checks that are not available here; those were not done.
 
@@ -77,7 +79,7 @@ HH:MM means its latest past occurrence. Durations such as `24h` or `7d` count ba
 - "REBOOT NEEDED" means the running kernel is no longer installed; it clears after a reboot.
 
 ### Snapshots, comparisons and recurring problems
-- A snapshot measures processes and services over one second when an alert starts, and again 10 s later; at most one per minute. It shows who was busy then, not why.
+- A snapshot measures processes and services over one second when an alert starts, and again 10 s later; at most one per minute (by default; `azor config` shows the `snapshot.*` settings in use). It shows who was busy then, not why.
 - `azor compare` gives averages for both periods, all time and idle only (CPU and GPU under 15%). Prefer the idle columns for temperatures and power: load hides changes. It says how much data stands behind each side; with less than an hour, treat differences as chance. A change after an update is a lead, not proof.
 - `azor problems` counts alerts (with median length and the program most often busiest in snapshots), failed timer runs, failed services, ends without a recorded shutdown, interruptions, and desktop restarts within 3 minutes after a resume.
 

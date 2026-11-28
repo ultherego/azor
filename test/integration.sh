@@ -167,10 +167,12 @@ scenario_longterm() {
 	check "problems counts the alerts" grep -qE 'memory stall: 3x' <<<"$p"
 	check "problems names the busiest program" grep -q 'hungry (3 of 3' <<<"$p"
 	check "problems counts the failed run" grep -q 'backup: 1 failed of 3' <<<"$p"
+	check "snapshots of removed days are listed from the history" test "$(az snapshots 30d | grep -c 'psi_memory')" = 3
 	start; stopd
 	check "summing up is not repeated" test "$(grep -c '"type":"day"' "$H/state/azor/history.jsonl")" -le 4
 }
 
+lacks() { ! grep -qiE "$1" <<<"$2"; }
 not_flagged() { ! grep -E 'RAM used.*\(' <<<"$1"; }
 
 scenario_compare_raw() {
@@ -184,6 +186,63 @@ scenario_compare_raw() {
 	check "the source is samples on both sides" test "$(grep -c '(samples)' <<<"$c")" = 2
 	check "idle columns show 40 -> 48 and the change" grep -qE 'CPU temperature C +40\.0 +48\.0 +40\.0 +48\.0 +\(\+8\.0\)' <<<"$c"
 	check "unchanged metrics are not flagged" not_flagged "$c"
+}
+
+scenario_space() {
+	echo "== the disk limit: oldest days go early, summed up first; today's file stays"
+	EXTRA="max_disk = 10" MODULES="cpu, memory" setup space
+	python3 - "$H/state/azor" <<'P'
+import json, sys, time, datetime
+d, now, pad = sys.argv[1], time.time(), 'x' * 200
+for back in (3, 2, 1):  # three old days of about 4 MB each
+    base = int(now - back * 86400)
+    with open(d + '/' + datetime.datetime.fromtimestamp(base).strftime('%Y-%m-%d') + '.jsonl', 'w') as f:
+        for i in range(12000):
+            f.write(json.dumps({'v': 1, 't': base - 43200 + i * 3, 'type': 'sample', 'secs': 3, 'avg': {'cpu': 5, 'mem': 30}, 'facts': {'pad': pad}}) + '\n')
+P
+	local before; before=$(du -sm "$H/state/azor" | cut -f1)
+	start; stopd
+	local after; after=$(du -sm "$H/state/azor" | cut -f1)
+	check "history shrank under the limit (${before} -> ${after} MB)" test "$(du -sb "$H/state/azor" | cut -f1)" -le 10000000
+	check "a SPACE event names the removed day" has 'SPACE +day [0-9-]+ removed before the retention'
+	check "today's file is kept" test -f "$H/state/azor/$(date +%F).jsonl"
+	check "the removed day was summed up first" grep -q '"type":"hour"' "$H/state/azor/history.jsonl"
+	check "status shows the share of the limit" grep -qE 'disk limit: [0-9]+% of max_disk = 10 MB' <<<"$(az status)"
+	local r; r=$(az range "$(date -d '-3 days -6 hours' '+%F %H:%M')" "$(date -d '-3 days -2 hours' '+%F %H:%M')")
+	check "a removed day still answers from hourly summaries" grep -q 'hourly summaries' <<<"$r"
+	local n; n=$(count 'SPACE')
+	start
+	local b; b=$(az brief)
+	stopd
+	check "the hook line mentions the disk limit" grep -q 'disk limit: samples of [0-9-]* removed early' <<<"$b"
+	check "nothing more is removed below the limit ($n SPACE events)" test "$(count 'SPACE')" = "$n"
+}
+
+scenario_snapshot_config() {
+	echo "== snapshot settings: no follow-up, fewer processes"
+	EXTRA=$'alert.mem = 1\nsnapshot.followup = off\nsnapshot.top = 2' setup snapcfg; start
+	waitfor "first snapshot" snap_has 'mem$'
+	sleep 13
+	stopd
+	check "no follow-up snapshot when it is off" test "$(az snapshots | grep -c 'later')" = 0
+	local l; l=$(az snapshot latest | grep 'CPU over 1 s')
+	check "a snapshot was listed with its processes" test -n "$l"
+	check "at most 2 processes listed ($(awk -F', ' '{print NF}' <<<"$l"))" test "$(awk -F', ' '{print NF}' <<<"$l")" -le 2
+	local c; c=$(az config)
+	check "config shows the snapshot settings" grep -qE 'snapshot.followup = off' <<<"$c"
+	check "config shows the disk limit" grep -qE 'max_disk = 200 MB' <<<"$c"
+}
+
+scenario_journal() {
+	echo "== journal: error counts with their coverage, health checks of the journal"
+	MODULES="cpu, journal, health" setup journal; start; sleep 3; stopd
+	local r; r=$(az range "$(date -d '-1 hour' '+%F %H:%M')" now)
+	check "range counts journal errors" grep -q '^Journal errors' <<<"$r"
+	check "range gives the journal coverage" grep -qE '^  journal coverage: (entries for [0-9]+% of the range|unknown)' <<<"$r"
+	check "no log message text in the output" lacks 'MESSAGE|"msg' "$r"
+	local h; h=$(az health)
+	check "health has the journal access check" grep -qE '^  journal_access +(readable|only own entries)|Not available here:.*journal_access' <<<"$h"
+	check "health has the journal kept check" grep -qE '^  journal_kept +(under 1 day|1 to 7 days|7 to 30 days|over 30 days)|Not available here:.*journal_kept' <<<"$h"
 }
 
 json_ok() { python3 -c "import json,sys; d=json.load(sys.stdin); assert d['azor_json']==1 and d['kind']=='$1', d.get('kind'); $2"; }
@@ -201,7 +260,7 @@ scenario_json() {
 }
 
 scenarios=("$@")
-[ ${#scenarios[@]} -eq 0 ] && scenarios=(stop_start interrupted boot suspend snapshot longterm compare_raw json)
+[ ${#scenarios[@]} -eq 0 ] && scenarios=(stop_start interrupted boot suspend snapshot snapshot_config longterm space journal compare_raw json)
 for s in "${scenarios[@]}"; do "scenario_$s"; done
 echo "passed $pass, failed $fail"
 [ "$fail" -eq 0 ]

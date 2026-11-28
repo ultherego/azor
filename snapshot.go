@@ -12,36 +12,46 @@ import (
 // The regular process list is taken once a minute and can miss a short-lived
 // culprit, so an alert takes its own measurement over one second.
 
+// Defaults; azor.conf can change them (snapshot.cooldown, snapshot.followup,
+// snapshot.top, snapshot.retention).
 const (
 	snapCooldown = time.Minute      // at most one snapshot per minute
 	snapFollowUp = 10 * time.Second // a second look: is it still going on?
 	snapTop      = 10
+	snapKeep     = keepHours // days in the long-term history
 )
 
 type snapshots struct {
-	last     time.Time
-	followAt time.Time
-	reason   string
+	cooldown, followUp time.Duration // followUp 0: no second look
+	last               time.Time
+	followAt           time.Time
+	reason             string
+}
+
+func newSnapshots(c Config) *snapshots {
+	return &snapshots{cooldown: c.SnapCooldown, followUp: c.SnapFollowUp}
 }
 
 // due tells whether an alert or a pending follow-up asks for a snapshot now.
 func (s *snapshots) due(now time.Time, alerts []string) (reason string, ok bool) {
 	if !s.followAt.IsZero() && !now.Before(s.followAt) {
 		s.followAt = time.Time{}
-		return s.reason + " (10 s later)", true
+		return fmt.Sprintf("%s (%s later)", s.reason, shortDur(s.followUp)), true
 	}
-	if len(alerts) == 0 || now.Sub(s.last) < snapCooldown {
+	if len(alerts) == 0 || now.Sub(s.last) < s.cooldown {
 		return "", false
 	}
 	s.last, s.reason = now, strings.Join(alerts, ", ")
-	s.followAt = now.Add(snapFollowUp)
+	if s.followUp > 0 {
+		s.followAt = now.Add(s.followUp)
+	}
 	return s.reason, true
 }
 
 // take measures processes and services over one second.
-func takeSnapshot(t time.Time, reason string, st State, withServices bool) Record {
+func takeSnapshot(t time.Time, reason string, st State, withServices bool, top int) Record {
 	ps, svc, sys := &procScan{}, &svcScan{}, &svcScan{}
-	ps.top(0, snapTop, nil)
+	ps.top(0, top, nil)
 	if withServices {
 		svc.scan(userCgroup(), 0)
 		sys.scan(systemCgroup, 0)
@@ -50,9 +60,9 @@ func takeSnapshot(t time.Time, reason string, st State, withServices bool) Recor
 	time.Sleep(time.Second)
 	secs := time.Since(start).Seconds()
 	r := Record{T: t.Unix(), Type: "snapshot", Key: reason, MemDef: 3, Avg: st.Values, New: strings.Join(st.Alerts, ", "), Desktop: st.Desktop}
-	r.CPU, r.Mem, _ = ps.top(secs, snapTop, nil)
+	r.CPU, r.Mem, _ = ps.top(secs, top, nil)
 	if withServices {
-		r.Services = notable(svc.scan(userCgroup(), secs), snapTop)
+		r.Services = notable(svc.scan(userCgroup(), secs), top)
 		r.System = notable(sys.scan(systemCgroup, secs), 3)
 	}
 	return r
@@ -105,7 +115,7 @@ func cmdSnapshots(w io.Writer, args []string) error {
 		return err
 	}
 	var list []Record
-	if err := load(dataDir(), from, to, func(r Record) {
+	if err := loadAll(dataDir(), from, to, func(r Record) {
 		if r.Type == "snapshot" {
 			list = append(list, r)
 		}
@@ -156,4 +166,12 @@ func abs(v int64) int64 {
 		return -v
 	}
 	return v
+}
+
+// shortDur writes whole seconds under a minute as "10 s", as before.
+func shortDur(d time.Duration) string {
+	if d < time.Minute && d%time.Second == 0 {
+		return fmt.Sprintf("%d s", d/time.Second)
+	}
+	return d.String()
 }

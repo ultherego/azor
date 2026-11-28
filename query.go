@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -321,6 +320,11 @@ func eventLine(r Record) string {
 		return fmt.Sprintf("%s  LOST   history not written for the previous %s", at, time.Duration(r.Secs)*time.Second)
 	case "gap":
 		return fmt.Sprintf("%s  GAP    no data for the previous %s (suspended, off or daemon stopped)", at, time.Duration(r.Secs)*time.Second)
+	case "space":
+		if r.New == "history" {
+			return fmt.Sprintf("%s  SPACE  long-term history before %s removed to stay within max_disk", at, r.Key)
+		}
+		return fmt.Sprintf("%s  SPACE  day %s removed before the retention to stay within max_disk (kept as hourly summaries)", at, r.Key)
 	case "fact":
 		return fmt.Sprintf("%s  change %s: %q -> %q", at, r.Key, r.Old, r.New)
 	case "unit":
@@ -768,9 +772,64 @@ func journal(w io.Writer, from, to time.Time) {
 		note = " (INCOMPLETE: reading stopped early)"
 	}
 	fmt.Fprintln(w, "Journal errors (count per unit)"+note+":", names(n, "x"))
-	if o := oldestJournal(); !o.IsZero() && from.Before(o) {
-		fmt.Fprintln(w, "  note: the journal only reaches back to", o.Format("2006-01-02 15:04"))
+	if line := journalCoverage(from, to); line != "" {
+		fmt.Fprintln(w, " ", line)
 	}
+}
+
+// journalCoverage tells how much of the range the journal has entries for,
+// from the list of boots (no log messages), and whether the system journal
+// can be read at all.
+func journalCoverage(from, to time.Time) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var out []string
+	if b, err := exec.CommandContext(ctx, "journalctl", "-q", "--no-pager", "--list-boots", "-o", "json").Output(); err == nil {
+		if secs, oldest, ok := bootCover(b, from, to); ok {
+			pct := min(100, secs/to.Sub(from).Seconds()*100)
+			l := fmt.Sprintf("journal coverage: entries for %.0f%% of the range", pct)
+			if from.Before(oldest) {
+				l += ", it only reaches back to " + oldest.Format("2006-01-02 15:04")
+			}
+			if pct < 99.5 {
+				l += " (the rest: computer off or suspended, or not kept)"
+			}
+			out = append(out, l)
+		}
+	}
+	if a, ok := (&health{}).journalAccess(); ok && a != "readable" {
+		out = append(out, "SYSTEM JOURNAL NOT READABLE: only your own services are counted")
+	}
+	if len(out) == 0 {
+		return "journal coverage: unknown"
+	}
+	return strings.Join(out, "; ")
+}
+
+// bootCover sums the time between the first and the last entry of each boot
+// that falls inside the range.
+func bootCover(b []byte, from, to time.Time) (secs float64, oldest time.Time, ok bool) {
+	var boots []struct {
+		First int64 `json:"first_entry"`
+		Last  int64 `json:"last_entry"`
+	}
+	if json.Unmarshal(b, &boots) != nil || len(boots) == 0 {
+		return
+	}
+	for _, x := range boots {
+		if x.First <= 0 || x.Last < x.First {
+			continue
+		}
+		f, l := time.UnixMicro(x.First), time.UnixMicro(x.Last)
+		if oldest.IsZero() || f.Before(oldest) {
+			oldest = f
+		}
+		if a, z := maxTime(f, from), minTime(l, to); z.After(a) {
+			secs += z.Sub(a).Seconds()
+		}
+		ok = true
+	}
+	return
 }
 
 func journalCount(in io.Reader) (n map[string]float64, complete bool) {
@@ -790,32 +849,6 @@ func journalCount(in io.Reader) (n map[string]float64, complete bool) {
 		}
 		n[name]++
 	}
-}
-
-// oldestJournal uses the list of boots, which contains no log messages.
-func oldestJournal() time.Time {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	b, err := exec.CommandContext(ctx, "journalctl", "-q", "--no-pager", "--list-boots", "-o", "json").Output()
-	if err != nil {
-		return time.Time{}
-	}
-	return oldestBoot(b)
-}
-
-func oldestBoot(b []byte) (t time.Time) {
-	var boots []struct {
-		First int64 `json:"first_entry"`
-	}
-	if json.Unmarshal(b, &boots) != nil {
-		return
-	}
-	for _, x := range boots {
-		if at := time.UnixMicro(x.First); x.First > 0 && (t.IsZero() || at.Before(t)) {
-			t = at
-		}
-	}
-	return
 }
 
 var pacLine = regexp.MustCompile(`^\[([^\]]+)\] \[ALPM\] (installed|upgraded|downgraded|removed) (\S+)`)
@@ -899,12 +932,7 @@ func cmdStatus(w io.Writer) error {
 	if lerr != nil {
 		fmt.Fprintln(w, "HISTORY UNREADABLE:", lerr)
 	}
-	var size int64
-	for _, n := range fs {
-		if i, err := os.Stat(filepath.Join(dataDir(), n)); err == nil {
-			size += i.Size()
-		}
-	}
+	size, long := diskUse(dataDir())
 	live := "not running or no data yet"
 	if i, err := os.Stat(stateFile()); err == nil {
 		age := time.Since(i.ModTime()).Round(time.Second)
@@ -913,13 +941,11 @@ func cmdStatus(w io.Writer) error {
 			live += " (STALE)"
 		}
 	}
-	long := int64(0)
-	if i, err := os.Stat(filepath.Join(dataDir(), historyFile)); err == nil {
-		long = i.Size()
-	}
 	fmt.Fprintf(w, "daemon: %s\ndata: %s, %d day files, %.1f MB, retention %d days; long-term history %.1f MB (hourly %d days, daily %d days)\n", live, dataDir(), len(fs), float64(size)/1e6, cfg.Retention, float64(long)/1e6, keepHours, keepDays)
-	if size+long > 500e6 {
-		fmt.Fprintln(w, "WARNING: the history is larger than 500 MB; lower the retention in azor.conf")
+	limit := int64(cfg.MaxDisk) * 1e6
+	fmt.Fprintf(w, "disk limit: %.0f%% of max_disk = %d MB\n", float64(size+long)/float64(limit)*100, cfg.MaxDisk)
+	if size+long > limit {
+		fmt.Fprintln(w, "OVER THE DISK LIMIT: today's file alone is too large, or the daemon has not trimmed yet; raise max_disk or lower the sampling")
 	}
 	var st State
 	if b, err := os.ReadFile(stateFile()); err == nil && json.Unmarshal(b, &st) == nil {
@@ -1151,6 +1177,11 @@ func briefEvent(r Record, now time.Time) string {
 		return fmt.Sprintf("%s no data for %s before", at, time.Duration(r.Secs)*time.Second)
 	case "lost":
 		return fmt.Sprintf("%s HISTORY LOST for %s before (could not write)", at, time.Duration(r.Secs)*time.Second)
+	case "space":
+		if r.New == "history" {
+			return at + " disk limit: history before " + cut(r.Key) + " removed"
+		}
+		return at + " disk limit: samples of " + cut(r.Key) + " removed early, hourly kept"
 	case "boot":
 		return fmt.Sprintf("%s new boot (off or no data for %s)", at, fmtSecs(r.Secs))
 	case "unexpected_boot":

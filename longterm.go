@@ -25,7 +25,7 @@ const (
 // longEvents are the events kept beyond the retention.
 var longEvents = map[string]bool{"boot": true, "unexpected_boot": true, "interrupted": true, "suspend": true, "gap": true,
 	"lost": true, "shutdown": true, "package": true, "alert": true, "clear": true, "timer": true, "unit": true,
-	"desktop": true, "health": true, "fact": true}
+	"desktop": true, "health": true, "fact": true, "space": true}
 
 // span sums samples over one hour or one day.
 type span struct {
@@ -131,33 +131,174 @@ type longState struct {
 
 // compact sums up the day files that the retention is about to remove, then
 // drops what is older than the long-term limits.
-func compact(dir string, now time.Time, retention int, interval float64) error {
+func compact(dir string, now time.Time, retention, snapDays int, interval float64) error {
+	limit := now.AddDate(0, 0, -retention).Format("2006-01-02") + ".jsonl"
+	changed := false
+	for _, n := range dayFiles(dir) {
+		if n >= limit {
+			continue
+		}
+		done, err := sumUp(dir, n, interval)
+		if err != nil {
+			return err
+		}
+		changed = changed || done
+	}
+	if changed {
+		return trimHistory(filepath.Join(dir, historyFile), now, snapDays)
+	}
+	return nil
+}
+
+// sumUp copies one day file into the long-term history, once. It reports
+// whether anything was added.
+func sumUp(dir, name string, interval float64) (bool, error) {
 	var st longState
 	if b, err := os.ReadFile(filepath.Join(dir, "longterm.json")); err == nil {
 		json.Unmarshal(b, &st)
 	}
-	limit := now.AddDate(0, 0, -retention).Format("2006-01-02") + ".jsonl"
-	changed := false
+	if name <= st.Done {
+		return false, nil
+	}
+	recs, err := summarize(filepath.Join(dir, name), interval)
+	if err != nil {
+		return false, err
+	}
+	if err := appendAll(filepath.Join(dir, historyFile), recs); err != nil {
+		return false, err // the day file stays; it is tried again next time
+	}
+	st.Done = name
+	return true, writeAtomic(filepath.Join(dir, "longterm.json"), st)
+}
+
+// diskUse is the size of the day files and of the long-term history.
+func diskUse(dir string) (days, long int64) {
 	for _, n := range dayFiles(dir) {
-		if n >= limit || n <= st.Done {
-			continue
-		}
-		recs, err := summarize(filepath.Join(dir, n), interval)
-		if err != nil {
-			return err
-		}
-		if err := appendAll(filepath.Join(dir, historyFile), recs); err != nil {
-			return err // the day file stays; it is tried again next time
-		}
-		st.Done, changed = n, true
-		if err := writeAtomic(filepath.Join(dir, "longterm.json"), st); err != nil {
-			return err
+		if i, err := os.Stat(filepath.Join(dir, n)); err == nil {
+			days += i.Size()
 		}
 	}
-	if changed {
-		return trimHistory(filepath.Join(dir, historyFile), now)
+	if i, err := os.Stat(filepath.Join(dir, historyFile)); err == nil {
+		long = i.Size()
 	}
-	return nil
+	return
+}
+
+// fitSpace keeps the history within limit bytes. The oldest day files go
+// first, each only after it is summed up; today's file always stays. If the
+// long-term history is still too large, its oldest records go. Nothing is
+// removed silently: each removal is returned as a "space" event.
+func fitSpace(dir string, now time.Time, limit int64, interval float64) (out []Record, err error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	today := filepath.Base(dayPath(dir, now))
+	for {
+		days := dayFiles(dir)
+		d, l := diskUse(dir)
+		if d+l <= limit || len(days) < 2 || days[0] >= today {
+			break
+		}
+		if _, err := sumUp(dir, days[0], interval); err != nil {
+			return out, err
+		}
+		if err := os.Remove(filepath.Join(dir, days[0])); err != nil {
+			return out, err
+		}
+		out = append(out, Record{T: now.Unix(), Type: "event", Kind: "space", Key: strings.TrimSuffix(days[0], ".jsonl"), New: "day"})
+	}
+	d, l := diskUse(dir)
+	if d+l <= limit || d >= limit { // with only today's file over the limit, the history is kept
+		return out, nil
+	}
+	cut, err := trimToSize(filepath.Join(dir, historyFile), limit-d)
+	if err != nil {
+		return out, err
+	}
+	if cut > 0 {
+		out = append(out, Record{T: now.Unix(), Type: "event", Kind: "space", Key: time.Unix(cut, 0).Format("2006-01-02 15:04"), New: "history"})
+	}
+	return out, nil
+}
+
+// trimToSize drops the oldest long-term records until the file fits in room
+// bytes. It returns the time of the oldest record kept, or 0 if nothing went.
+func trimToSize(path string, room int64) (int64, error) {
+	type line struct{ t, n int64 }
+	var lines []line
+	var total int64
+	err := scanLong(path, func(t int64, b []byte) {
+		lines = append(lines, line{t, int64(len(b)) + 1})
+		total += int64(len(b)) + 1
+	})
+	if err != nil || total <= room {
+		return 0, err
+	}
+	sort.Slice(lines, func(i, j int) bool { return lines[i].t > lines[j].t })
+	var used, cut int64
+	for _, x := range lines {
+		if used+x.n > room {
+			break
+		}
+		used += x.n
+		cut = x.t
+	}
+	if cut == 0 { // not even one record fits
+		cut = lines[0].t + 1
+	}
+	in, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer in.Close()
+	tmp := path + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return 0, err
+	}
+	w := bufio.NewWriter(out)
+	sc := bufio.NewScanner(in)
+	sc.Buffer(make([]byte, 64<<10), 4<<20)
+	for sc.Scan() {
+		var r struct {
+			T int64 `json:"t"`
+		}
+		if json.Unmarshal(sc.Bytes(), &r) == nil && r.T >= cut {
+			w.Write(append(append([]byte{}, sc.Bytes()...), '\n'))
+		}
+	}
+	if err := w.Flush(); err != nil {
+		out.Close()
+		return 0, err
+	}
+	out.Close()
+	if err := sc.Err(); err != nil {
+		os.Remove(tmp)
+		return 0, err
+	}
+	return cut, os.Rename(tmp, path)
+}
+
+// scanLong gives the time and the raw line of each long-term record.
+func scanLong(path string, fn func(int64, []byte)) error {
+	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64<<10), 4<<20)
+	for sc.Scan() {
+		var r struct {
+			T int64 `json:"t"`
+		}
+		if json.Unmarshal(sc.Bytes(), &r) == nil {
+			fn(r.T, sc.Bytes())
+		}
+	}
+	return sc.Err()
 }
 
 func appendAll(path string, recs []Record) error {
@@ -182,7 +323,7 @@ func appendAll(path string, recs []Record) error {
 }
 
 // trimHistory rewrites the long-term file without the records past their limit.
-func trimHistory(path string, now time.Time) error {
+func trimHistory(path string, now time.Time, snapDays int) error {
 	in, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -194,6 +335,7 @@ func trimHistory(path string, now time.Time) error {
 		return err
 	}
 	hours, rest := now.AddDate(0, 0, -keepHours).Unix(), now.AddDate(0, 0, -keepDays).Unix()
+	snaps := now.AddDate(0, 0, -snapDays).Unix()
 	w := bufio.NewWriter(out)
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 64<<10), 4<<20)
@@ -205,7 +347,7 @@ func trimHistory(path string, now time.Time) error {
 		if json.Unmarshal(sc.Bytes(), &r) != nil {
 			continue
 		}
-		if (r.Type == "hour" || r.Type == "snapshot") && r.T < hours || r.T < rest {
+		if r.Type == "hour" && r.T < hours || r.Type == "snapshot" && r.T < snaps || r.T < rest {
 			continue
 		}
 		w.Write(append(append([]byte{}, sc.Bytes()...), '\n'))

@@ -524,11 +524,101 @@ func TestSessionAndBoots(t *testing.T) {
 	if d, k := parseSession("Type=wayland\nDesktop=foo"); d != "foo" || k != "wayland" {
 		t.Fatal(d, k)
 	}
-	if o := oldestBoot([]byte(`[{"first_entry":2000000},{"first_entry":1000000}]`)); o.Unix() != 1 {
-		t.Fatal(o)
+	// two boots: 1000-2000 s and 5000-6000 s; the range 1500-5500 s
+	b := []byte(`[{"first_entry":5000000000,"last_entry":6000000000},{"first_entry":1000000000,"last_entry":2000000000}]`)
+	secs, oldest, ok := bootCover(b, time.Unix(1500, 0), time.Unix(5500, 0))
+	if !ok || secs != 1000 || oldest.Unix() != 1000 {
+		t.Fatal(secs, oldest, ok)
 	}
-	if !oldestBoot([]byte("x")).IsZero() {
+	if _, _, ok := bootCover([]byte("x"), time.Unix(0, 0), time.Unix(1, 0)); ok {
 		t.Fatal("garbage accepted")
+	}
+	if _, _, ok := bootCover([]byte(`[]`), time.Unix(0, 0), time.Unix(1, 0)); ok {
+		t.Fatal("no boots is not coverage")
+	}
+}
+
+func TestFitSpace(t *testing.T) {
+	d := t.TempDir()
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.Local)
+	pad := strings.Repeat("x", 900)
+	for day := 3; day >= 0; day-- { // four day files of about 100 kB each
+		at := now.AddDate(0, 0, -day)
+		for i := 0; i < 100; i++ {
+			appendRecord(d, Record{T: at.Add(time.Duration(i-100) * time.Minute).Unix(), Type: "sample", Avg: map[string]float64{"cpu": 1}, Facts: map[string]string{"pad": pad}})
+		}
+	}
+	if es, err := fitSpace(d, now, 1<<30, 10); err != nil || len(es) != 0 {
+		t.Fatal("removed below the limit", es, err)
+	}
+	all, _ := diskUse(d)
+	limit := all * 3 / 4 // room for about three of the four days
+	es, err := fitSpace(d, now, limit, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	days, long := diskUse(d)
+	if days+long > limit {
+		t.Fatal("over the limit", days, long)
+	}
+	if len(es) == 0 || es[0].Kind != "space" || es[0].Key != "2026-11-25" || es[0].New != "day" {
+		t.Fatal(es)
+	}
+	if _, err := os.Stat(dayPath(d, now)); err != nil {
+		t.Fatal("today's file removed")
+	}
+	hours := 0
+	loadLong(d, now.AddDate(0, 0, -5), now, func(r Record) {
+		if r.Type == "hour" {
+			hours++
+		}
+	})
+	if hours == 0 {
+		t.Fatal("removed day not summed up first")
+	}
+	if !strings.Contains(eventLine(es[0]), "SPACE") {
+		t.Fatal(eventLine(es[0]))
+	}
+	// only today's file is over the limit: the long-term history stays
+	if _, err := fitSpace(d, now, 10, 10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dayPath(d, now)); err != nil {
+		t.Fatal("today's file removed")
+	}
+	if _, l := diskUse(d); l == 0 {
+		t.Fatal("history removed although only today's file is too large")
+	}
+}
+
+func TestTrimToSize(t *testing.T) {
+	p := filepath.Join(t.TempDir(), historyFile)
+	var recs []Record
+	for i := int64(1); i <= 100; i++ {
+		recs = append(recs, Record{T: i * 3600, Type: "hour", Avg: map[string]float64{"cpu": 1}})
+	}
+	appendAll(p, recs)
+	i, _ := os.Stat(p)
+	cut, err := trimToSize(p, i.Size()/2)
+	if err != nil || cut == 0 {
+		t.Fatal(cut, err)
+	}
+	j, _ := os.Stat(p)
+	if j.Size() > i.Size()/2 {
+		t.Fatal(j.Size())
+	}
+	n := 0
+	scanLong(p, func(t0 int64, _ []byte) {
+		if t0 < cut {
+			t.Fatal("older record kept")
+		}
+		n++
+	})
+	if n == 0 || n >= 100 {
+		t.Fatal(n)
+	}
+	if c, _ := trimToSize(p, 1<<30); c != 0 {
+		t.Fatal("trimmed under the limit")
 	}
 }
 
@@ -1345,5 +1435,99 @@ func TestKernelFileRecordsAreCache(t *testing.T) {
 	p, _ := measure(r+"/u.service", 0, nil, map[string]float64{}, nil)
 	if p.MB > 10 || p.Cache < 4100 {
 		t.Fatalf("%+v", p)
+	}
+}
+
+func TestSnapshotSettings(t *testing.T) {
+	c := defaults()
+	for k, v := range map[string]string{"snapshot.cooldown": "5m", "snapshot.followup": "off", "snapshot.top": "3", "snapshot.retention": "14", "max_disk": "50"} {
+		if !c.set(k, v) {
+			t.Fatal("rejected", k, v)
+		}
+	}
+	for k, v := range map[string]string{"snapshot.cooldown": "1s", "snapshot.top": "0", "snapshot.retention": "31", "max_disk": "5"} {
+		if c.set(k, v) {
+			t.Fatal("accepted", k, v)
+		}
+	}
+	if c.SnapCooldown != 5*time.Minute || c.SnapFollowUp != 0 || c.SnapTop != 3 || c.SnapKeep != 14 || c.MaxDisk != 50 {
+		t.Fatal(c)
+	}
+	s, now := newSnapshots(c), time.Unix(1000, 0)
+	if _, ok := s.due(now, []string{"cpu_temp"}); !ok {
+		t.Fatal("no snapshot at an alert")
+	}
+	if _, ok := s.due(now.Add(time.Minute), []string{"cpu_temp"}); ok {
+		t.Fatal("cooldown ignored or follow-up taken although off")
+	}
+	if _, ok := s.due(now.Add(5*time.Minute), []string{"cpu_temp"}); !ok {
+		t.Fatal("no snapshot after the cooldown")
+	}
+	d := defaults()
+	s = newSnapshots(d)
+	s.due(now, []string{"x"})
+	if why, ok := s.due(now.Add(10*time.Second), nil); !ok || !strings.Contains(why, "(10 s later)") {
+		t.Fatal(why, ok)
+	}
+}
+
+func TestSnapshotRetention(t *testing.T) {
+	p := filepath.Join(t.TempDir(), historyFile)
+	now := time.Unix(100*86400, 0)
+	appendAll(p, []Record{
+		{T: now.AddDate(0, 0, -20).Unix(), Type: "snapshot", Key: "old"},
+		{T: now.AddDate(0, 0, -5).Unix(), Type: "snapshot", Key: "new"},
+		{T: now.AddDate(0, 0, -20).Unix(), Type: "hour"},
+	})
+	if err := trimHistory(p, now, 14); err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	scanLong(p, func(_ int64, b []byte) { kept = append(kept, string(b)) })
+	if len(kept) != 2 || strings.Contains(strings.Join(kept, ""), `"old"`) {
+		t.Fatal(kept)
+	}
+}
+
+func TestJournalChecks(t *testing.T) {
+	r := t.TempDir()
+	if _, ok := (&health{root: r}).journalAccess(); ok {
+		t.Fatal("no machine id, but found")
+	}
+	put(t, r, map[string]string{"etc/machine-id": "abc\n", "var/log/journal/abc/system.journal": ""})
+	h := &health{root: r}
+	if s, ok := h.journalAccess(); !ok || s != "readable" {
+		t.Fatal(s, ok)
+	}
+	if os.Getuid() != 0 { // root reads everything
+		os.Chmod(filepath.Join(r, "var/log/journal/abc/system.journal"), 0)
+		if s, _ := h.journalAccess(); s != "only own entries" {
+			t.Fatal(s)
+		}
+		for _, c := range h.list() {
+			if c.name == "journal_access" && !strings.Contains(c.problem(0, "only own entries"), "not readable") {
+				t.Fatal("no problem for an unreadable journal")
+			}
+		}
+	}
+	put(t, r, map[string]string{"etc/machine-id": "../x"})
+	if _, ok := h.journalAccess(); ok {
+		t.Fatal("a path in the machine id accepted")
+	}
+	if _, ok := h.journalKept(); ok {
+		t.Fatal("journalctl used for a test root")
+	}
+	for d, want := range map[time.Duration]string{time.Hour: "under 1 day", 48 * time.Hour: "1 to 7 days", 10 * 24 * time.Hour: "7 to 30 days", 40 * 24 * time.Hour: "over 30 days"} {
+		if got := keptStep(d); got != want {
+			t.Fatal(d, got)
+		}
+	}
+	for _, c := range (&health{}).list() {
+		if c.name == "journal_kept" && (c.problem(0, "under 1 day") == "" || c.problem(0, "1 to 7 days") != "") {
+			t.Fatal("journal_kept problem")
+		}
+	}
+	if journalCoverage(time.Now().Add(-time.Hour), time.Now()) == "" {
+		t.Fatal("no coverage line")
 	}
 }

@@ -20,6 +20,9 @@ var sampleConfig string
 type Config struct {
 	Sample, Interval, ProcInterval                   time.Duration
 	Retention                                        int
+	MaxDisk                                          int // MB (10^6 bytes) for all history together
+	SnapCooldown, SnapFollowUp                       time.Duration
+	SnapTop, SnapKeep                                int
 	Off                                              map[string]bool // disabled modules
 	TopN                                             int
 	WatchProcs, WatchFiles, WatchUnits, IgnoreTimers []string
@@ -28,7 +31,8 @@ type Config struct {
 }
 
 func defaults() Config {
-	return Config{Sample: 2 * time.Second, Interval: 10 * time.Second, ProcInterval: time.Minute, Retention: 7,
+	return Config{Sample: 2 * time.Second, Interval: 10 * time.Second, ProcInterval: time.Minute, Retention: 7, MaxDisk: 200,
+		SnapCooldown: snapCooldown, SnapFollowUp: snapFollowUp, SnapTop: snapTop, SnapKeep: snapKeep,
 		Off: map[string]bool{}, TopN: 5, GPU: "auto", Alerts: map[string]float64{}}
 }
 
@@ -129,6 +133,35 @@ func (c *Config) set(k, v string) bool {
 			return false
 		}
 		c.Retention = n
+		return true
+	case "max_disk":
+		n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSpace(v), "MB"))
+		if err != nil || n < 10 || n > 100000 {
+			return false
+		}
+		c.MaxDisk = n
+		return true
+	case "snapshot.cooldown":
+		return dur(&c.SnapCooldown, 10*time.Second, 24*time.Hour)
+	case "snapshot.followup":
+		if v == "off" || v == "0" {
+			c.SnapFollowUp = 0
+			return true
+		}
+		return dur(&c.SnapFollowUp, 2*time.Second, 5*time.Minute)
+	case "snapshot.top":
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 20 {
+			return false
+		}
+		c.SnapTop = n
+		return true
+	case "snapshot.retention":
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > keepHours {
+			return false
+		}
+		c.SnapKeep = n
 		return true
 	case "modules":
 		return c.setModules(v)
@@ -231,8 +264,8 @@ func cmdConfig(w io.Writer) error {
 			mods = append(mods, m)
 		}
 	}
-	fmt.Fprintf(w, "modules = %s\nsample = %s\ninterval = %s\nprocess_interval = %s\nretention = %d\ntop = %d\ngpu = %s\nwatch.processes = %s\nwatch.files = %s\nwatch.units = %s\nignore.timers = %s\n",
-		strings.Join(mods, ", "), c.Sample, c.Interval, c.ProcInterval, c.Retention, c.TopN, c.GPU, strings.Join(c.WatchProcs, ", "), strings.Join(c.WatchFiles, ", "), strings.Join(c.WatchUnits, ", "), strings.Join(c.IgnoreTimers, ", "))
+	fmt.Fprintf(w, "modules = %s\nsample = %s\ninterval = %s\nprocess_interval = %s\nretention = %d\nmax_disk = %d MB\nsnapshot.cooldown = %s\nsnapshot.followup = %s\nsnapshot.top = %d\nsnapshot.retention = %d\ntop = %d\ngpu = %s\nwatch.processes = %s\nwatch.files = %s\nwatch.units = %s\nignore.timers = %s\n",
+		strings.Join(mods, ", "), c.Sample, c.Interval, c.ProcInterval, c.Retention, c.MaxDisk, c.SnapCooldown, followName(c.SnapFollowUp), c.SnapTop, c.SnapKeep, c.TopN, c.GPU, strings.Join(c.WatchProcs, ", "), strings.Join(c.WatchFiles, ", "), strings.Join(c.WatchUnits, ", "), strings.Join(c.IgnoreTimers, ", "))
 	var ks []string
 	for k := range c.Alerts {
 		ks = append(ks, k)
@@ -249,4 +282,11 @@ func cmdConfig(w io.Writer) error {
 		fmt.Fprintln(w, "# warning:", x)
 	}
 	return nil
+}
+
+func followName(d time.Duration) string {
+	if d == 0 {
+		return "off"
+	}
+	return d.String()
 }

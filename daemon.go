@@ -249,11 +249,23 @@ func runDaemon() error {
 		lastSaved = r.T
 	}
 	now := time.Now()
-	if err := compact(dir, now, cfg.Retention, cfg.Interval.Seconds()); err != nil {
-		fmt.Fprintln(os.Stderr, "azor: long-term history:", err)
-	} else {
-		prune(dir, now, cfg.Retention) // a day file is removed only once it is summed up
+	keep := func(now time.Time, daily bool) {
+		if daily {
+			if err := compact(dir, now, cfg.Retention, cfg.SnapKeep, cfg.Interval.Seconds()); err != nil {
+				fmt.Fprintln(os.Stderr, "azor: long-term history:", err)
+				return
+			}
+			prune(dir, now, cfg.Retention) // a day file is removed only once it is summed up
+		}
+		es, err := fitSpace(dir, now, int64(cfg.MaxDisk)*1e6, cfg.Interval.Seconds())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "azor: disk limit:", err)
+		}
+		for _, e := range es {
+			store(e)
+		}
 	}
+	keep(now, true)
 	last := lastSample(dir, now)
 	lastSaved = last
 	prev, known := loadSession(dir)
@@ -263,7 +275,7 @@ func runDaemon() error {
 	}
 	saveSession(dir, cur)
 	sleep := newSleepWatch()
-	snaps := &snapshots{}
+	snaps := newSnapshots(cfg)
 
 	s, ps, a := newSensors(cfg, ""), &procScan{}, newAgg()
 	al := alerts{makeRules(cfg, s.crit), map[string]*alert{}}
@@ -272,6 +284,7 @@ func runDaemon() error {
 		_, _, st.Watch = ps.top(0, cfg.TopN, cfg.WatchProcs)
 	}
 	lastFlush, lastProc, lastTick, day := now, now, now, now.YearDay()
+	spaceAt := now
 	var svcNames []string
 	for _, p := range svc.scan(userCgroup(), 0) {
 		svcNames = append(svcNames, p.Name)
@@ -531,7 +544,7 @@ func runDaemon() error {
 		if cfg.on("snapshots") {
 			if why, ok := snaps.due(now, fired); ok {
 				st.Values = avg
-				store(takeSnapshot(now, why, st, cfg.on("processes")))
+				store(takeSnapshot(now, why, st, cfg.on("processes"), cfg.SnapTop))
 			}
 		}
 		if d := now.Sub(lastProc.Round(0)); d >= cfg.ProcInterval-cfg.Sample {
@@ -574,11 +587,11 @@ func runDaemon() error {
 		}
 		if now.YearDay() != day {
 			day = now.YearDay()
-			if err := compact(dir, now, cfg.Retention, cfg.Interval.Seconds()); err != nil {
-				fmt.Fprintln(os.Stderr, "azor: long-term history:", err)
-			} else {
-				prune(dir, now, cfg.Retention)
-			}
+			keep(now, true)
+			spaceAt = now
+		} else if now.Sub(spaceAt) >= time.Hour { // today's file grows too
+			keep(now, false)
+			spaceAt = now
 		}
 	}
 }
