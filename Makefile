@@ -2,12 +2,17 @@ export CGO_ENABLED = 0
 BIN = $(HOME)/.local/bin/azor
 UNIT = $(HOME)/.config/systemd/user/azor.service
 
-.PHONY: build test install uninstall
+.PHONY: build test integration check install uninstall
 build:
 	go build -trimpath -buildvcs=false -ldflags '-s -w -buildid=' -o azor .
 test:
 	test -z "$$(gofmt -l .)" && go vet ./... && go test ./...
-install: test build
+# The real daemon and CLI in throw-away directories (needs a user session; not
+# run by the package builds, which use `make test`).
+integration:
+	bash test/integration.sh
+check: test integration
+install: check build
 	install -Dm755 azor $(BIN)
 	mkdir -p $(dir $(UNIT))
 	sed 's|@BIN@|%h/.local/bin/azor|' azor.service > $(UNIT)

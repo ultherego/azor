@@ -27,7 +27,7 @@ Azor is a small daemon that records the computer's state every few seconds, also
 | settings in use, configuration files it watches | `azor config`, `azor files` |
 | raw records (may name programs and files; ask before sharing them) | `azor export 1h` |
 
-HH:MM means its latest past occurrence; a range of HH:MM times under a day that reaches past now ends now (`azor range 12:00 15:00` at 14:00 is today 12:00 until now, and says so). Check the `Range` line for the dates actually used. Durations such as `24h` or `7d` count back from now. Every sample is kept for the retention (7 days by default); older periods have hourly summaries for 30 days and daily ones for 90 days, which `azor range` uses when no samples are left, and say so. All history stays under `max_disk` (200 MB by default); when it would not, the oldest days lose their samples early and, if still needed, the oldest summaries go.
+HH:MM means its latest past occurrence; a range of HH:MM times under a day that reaches past now ends now (`azor range 12:00 15:00` at 14:00 is today 12:00 until now, and says so). Check the `Range` line for the dates actually used. Durations such as `24h` or `7d` count back from now. Every sample is kept for the retention (7 days by default); older periods have hourly summaries for 30 days and daily ones for 90 days. `azor range`, `peaks`, `compare` and `events` read them for the part of a range before the oldest samples and say so ("N samples and M hourly or daily summaries"); summaries hold averages, peaks and events, but no processes, services or idle split. All history stays under `max_disk` (200 MB by default); when it would not, the oldest days lose their samples early and, if still needed, the oldest summaries go.
 
 ## Method
 
@@ -83,7 +83,7 @@ HH:MM means its latest past occurrence; a range of HH:MM times under a day that 
 ### Snapshots, comparisons and recurring problems
 - A snapshot measures processes and services over one second when an alert starts, and again 10 s later; at most one per minute (by default; `azor config` shows the `snapshot.*` settings in use). It shows who was busy then, not why.
 - `azor compare` gives averages for both periods, all time and idle only (CPU and GPU under 15%). Prefer the idle columns for temperatures and power: load hides changes. It says how much data stands behind each side; with less than an hour, treat differences as chance. A change after an update is a lead, not proof.
-- `azor problems` counts alerts (with median length and the program most often busiest in snapshots), failed timer runs, failed services, ends without a recorded shutdown, interruptions, and desktop restarts within 3 minutes after a resume.
+- `azor problems` counts alerts (with median length and the program most often busiest in snapshots), failed timer runs, failed services, ends without a recorded shutdown, interruptions, and desktop restarts within 3 minutes after a resume. Service failures at a recorded logout, Azor stop or shutdown are left out and counted apart; 3 or more failures in the same minute without one are listed together: a common cause, or a session end that was not recorded.
 
 ### Desktop and services
 - A `desktop` event means a restart or end of the display server or a desktop part was seen; the cause is known only when the event names it.

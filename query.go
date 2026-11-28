@@ -298,8 +298,9 @@ func (s *summary) add(r Record, secs float64) {
 		}
 	}
 	for k, v := range r.Avg {
-		s.sum[k] += v * secs
-		s.wt[k] += secs
+		f := secs * r.share(k)
+		s.sum[k] += v * f
+		s.wt[k] += f
 	}
 }
 
@@ -527,49 +528,45 @@ func cmdRange(w io.Writer, args []string) error {
 	var mixedMem, newerMem bool
 	groups, gaps := groupCover{}, gapTimes{}
 	var snaps []Record
-	sp := &spans{fallback: cfg.Interval.Seconds()}
-	var covered float64
-	var guessed, wider int
+	var covered, older float64
+	var guessed, wider, summaries int
 	cpu, mem, watch, fs := map[string]float64{}, map[string]float64{}, map[string][2]float64{}, map[string][2]float64{}
-	// A sample is stored at its end, so one that ends after the range may still
-	// cover part of it.
-	err = load(dataDir(), from, to.Add(10*time.Minute), func(r Record) {
-		if r.Type != "sample" && r.T > to.Unix() {
-			return
-		}
-		switch r.Type {
-		case "sample":
-			secs, sure := sp.next(r)
-			part := overlap(r.T, secs, from, to)
-			if part <= 0 {
-				return
+	timeline := func(r Record, length, scale float64) { // every row the record reaches, with its share
+		for i := range parts {
+			lo := from.Add(time.Duration(i) * step)
+			if w := overlap(r.T, length, lo, lo.Add(step)); w > 0 {
+				if parts[i] == nil {
+					parts[i] = newSummary()
+				}
+				parts[i].add(r, w*scale)
+				if w < length { // its maximum may lie outside this row
+					parts[i].wide = true
+				}
 			}
+		}
+	}
+	_, err = readHistory(dataDir(), from, to, cfg.Interval.Seconds(), func(r Record, length, scale float64, sure bool) {
+		switch r.Type {
+		case "hour", "day": // before the day files
+			w := overlap(r.T, length, from, to) * scale
+			older += w
+			summaries++
+			all.add(r, w)
+			timeline(r, length, scale)
+		case "sample":
+			part := overlap(r.T, length, from, to)
 			covered += part
 			groups.add(r, part)
 			if !sure {
 				guessed++
 			}
-			if secs > part+1 {
+			if length > part+1 {
 				wider++
 			}
 			all.add(r, part)
-			for i := range parts { // every row the sample reaches, with its share
-				lo := from.Add(time.Duration(i) * step)
-				if w := overlap(r.T, secs, lo, lo.Add(step)); w > 0 {
-					if parts[i] == nil {
-						parts[i] = newSummary()
-					}
-					parts[i].add(r, w)
-					if w < secs { // its maximum may lie outside this row
-						parts[i].wide = true
-					}
-				}
-			}
+			timeline(r, length, 1)
 		case "event":
 			events = append(events, r)
-			if r.Kind == "gap" || r.Kind == "start" || r.Kind == "lost" || r.Kind == "boot" || r.Kind == "interrupted" || r.Kind == "suspend" {
-				sp.cut()
-			}
 			gaps.add(r, from, to)
 		case "snapshot":
 			snaps = append(snaps, r)
@@ -629,33 +626,26 @@ func cmdRange(w io.Writer, args []string) error {
 	if endsNow {
 		fmt.Fprintf(w, "  note: %s is still ahead today, so the range ends now\n", args[1])
 	}
-	usedHourly := false
-	if all.n == 0 { // older than the day files: the hourly summaries
-		hourly := 0.0
-		loadLong(dataDir(), from, to.Add(time.Hour), func(r Record) {
-			if r.Type == "hour" {
-				if part := overlap(r.T, 3600, from, to); part > 0 && r.Secs > 0 {
-					w := float64(r.Secs) * part / 3600
-					all.add(r, w)
-					hourly += w
-				}
-			}
-		})
-		covered = hourly
-		usedHourly = all.n > 0
-		if usedHourly {
-			fmt.Fprintf(w, "From hourly summaries (older than the day files): about %.0f%% of the range covered; averages are weighted by time, peaks are the highest reads of each hour.\n", min(covered/to.Sub(from).Seconds()*100, 100))
-			all.print(w)
-		}
-	}
+	total := to.Sub(from).Seconds()
 	if all.n == 0 {
 		fmt.Fprintln(w, "No samples in this range.")
-	} else if usedHourly { // already printed above
 	} else {
-		pct := covered / to.Sub(from).Seconds() * 100
-		fmt.Fprintf(w, "%d samples, about %.0f%% of the range covered (averages weighted by time)\n", all.n, min(pct, 100))
-		fmt.Fprintln(w, "  time:", gaps.describe(to.Sub(from).Seconds(), covered))
-		fmt.Fprintln(w, "  data per group (share of the recorded time):", groups.describe(covered))
+		pct := (covered + older) / total * 100
+		if summaries > 0 {
+			fmt.Fprintf(w, "%d samples and %d hourly or daily summaries, about %.0f%% of the range covered (averages weighted by time)\n", all.n-summaries, summaries, min(pct, 100))
+			fmt.Fprintf(w, "  note: before %s only summaries are left (%s of data): their peaks are the highest reads of each hour or day, and they hold no processes or services\n",
+				rawSince(dataDir()).Format("2006-01-02"), fmtSecs(int64(older)))
+		} else {
+			fmt.Fprintf(w, "%d samples, about %.0f%% of the range covered (averages weighted by time)\n", all.n, min(pct, 100))
+		}
+		fmt.Fprintln(w, "  time:", gaps.describe(total, covered+older))
+		if covered > 0 {
+			share := "share of the recorded time"
+			if summaries > 0 {
+				share = "share of the time with samples"
+			}
+			fmt.Fprintf(w, "  data per group (%s): %s\n", share, groups.describe(covered))
+		}
 		if guessed > 0 {
 			fmt.Fprintf(w, "  note: %d older samples do not record their length; their coverage is estimated\n", guessed)
 		}
@@ -915,21 +905,19 @@ func cmdPeaks(w io.Writer, args []string) error {
 	}
 	s := newSummary()
 	cfg, _ := loadConfig()
-	sp := &spans{fallback: cfg.Interval.Seconds()}
-	if err := load(dataDir(), from, to.Add(10*time.Minute), func(r Record) {
-		switch {
-		case r.Type == "sample":
-			secs, _ := sp.next(r) // the same weights as in azor range
-			if part := overlap(r.T, secs, from, to); part > 0 {
-				s.add(r, part)
-			}
-		case r.Type == "event" && (r.Kind == "gap" || r.Kind == "start" || r.Kind == "lost"):
-			sp.cut()
+	used, err := readHistory(dataDir(), from, to, cfg.Interval.Seconds(), func(r Record, length, scale float64, _ bool) {
+		if r.Type == "sample" || r.Type == "hour" || r.Type == "day" { // the same weights as in azor range
+			s.add(r, overlap(r.T, length, from, to)*scale)
 		}
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "Peaks since %s (%d samples)\n", from.Format("2006-01-02 15:04"), s.n)
+	if used {
+		fmt.Fprintf(w, "Peaks since %s (%d samples and summaries; before %s only hourly or daily summaries)\n", from.Format("2006-01-02 15:04"), s.n, rawSince(dataDir()).Format("2006-01-02"))
+	} else {
+		fmt.Fprintf(w, "Peaks since %s (%d samples)\n", from.Format("2006-01-02 15:04"), s.n)
+	}
 	s.print(w)
 	return nil
 }
@@ -940,7 +928,7 @@ func cmdEvents(w io.Writer, args []string) error {
 		return err
 	}
 	n := 0
-	err = load(dataDir(), from, to, func(r Record) {
+	err = loadAll(dataDir(), from, to, func(r Record) { // also the long-term copy, like azor json events
 		if r.Type == "event" {
 			n++
 			fmt.Fprintln(w, eventLine(r))

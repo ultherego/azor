@@ -35,38 +35,22 @@ type period struct {
 
 func measurePeriod(dir string, from, to time.Time, interval float64) (p period, err error) {
 	p = period{from: from, to: to, all: newSpan(to.Unix()), calm: newSpan(to.Unix())}
-	edge := rawSince(dir)
-	if from.Before(edge) {
-		if err = loadLong(dir, from, minTime(to, edge), func(r Record) {
-			if r.Type == "hour" {
-				if part := overlap(r.T, 3600, from, minTime(to, edge)); part > 0 && r.Secs > 0 {
-					w := float64(r.Secs) * part / 3600
-					p.secs += w
-					p.all.add(r, w)
-					p.hourly = true // only when summaries were really used
-				}
+	_, err = readHistory(dir, from, to, interval, func(r Record, length, scale float64, _ bool) {
+		switch r.Type {
+		case "hour", "day": // before the day files; summaries have no idle split
+			if w := overlap(r.T, length, from, to) * scale; w > 0 {
+				p.secs += w
+				p.all.add(r, w)
+				p.hourly = true
 			}
-		}); err != nil {
-			return
-		}
-	}
-	sp := &spans{fallback: interval}
-	err = load(dir, maxTime(from, edge), to.Add(10*time.Minute), func(r Record) {
-		switch {
-		case r.Type == "sample":
-			secs, _ := sp.next(r)
-			part := overlap(r.T, secs, maxTime(from, edge), to)
-			if part <= 0 {
-				return
-			}
+		case "sample":
+			part := overlap(r.T, length, from, to)
 			p.secs += part
 			p.all.add(r, part)
 			if idle(r.Avg) {
 				p.quiet += part
 				p.calm.add(r, part)
 			}
-		case r.Type == "event" && gapNames[r.Kind] != "" || r.Type == "event" && r.Kind == "start":
-			sp.cut()
 		}
 	})
 	return
@@ -87,7 +71,7 @@ func printCompare(w io.Writer, title string, a, b period) {
 	}{{"before", a}, {"after", b}} {
 		src := "samples"
 		if p.p.hourly {
-			src = "partly hourly summaries"
+			src = "partly hourly or daily summaries"
 		}
 		fmt.Fprintf(w, "  %-6s %s - %s: data for %s (%s), idle %s\n", p.name, p.p.from.Format("01-02 15:04"), p.p.to.Format("01-02 15:04"),
 			fmtSecs(int64(p.p.secs)), src, fmtSecs(int64(p.p.quiet)))
@@ -279,6 +263,8 @@ func cmdProblems(w io.Writer, args []string) error {
 			if r.Key == "display server" && r.New == "ended" {
 				logouts = append(logouts, r.T)
 			}
+		case r.Kind == "stop" || r.Kind == "shutdown": // Azor stops with the session or the system
+			logouts = append(logouts, r.T)
 		case r.Kind == "unexpected_boot" || r.Kind == "interrupted" || r.Kind == "lost" || r.Kind == "boot":
 			counts[r.Kind]++
 		}
@@ -286,15 +272,10 @@ func cmdProblems(w io.Writer, args []string) error {
 		return err
 	}
 	atLogout := 0
-	together := map[int64]int{} // a session end stops many services at once
-	for _, ts := range unitFails {
-		for _, t := range ts {
-			together[t/60]++
-		}
-	}
-	for k, ts := range unitFails { // the desktop's services stop with its session
-		for _, t := range ts {
-			ended := together[t/60] >= 3
+	together := map[int64][]string{}          // failures at the same minute without a recorded session end
+	for _, k := range sortedKeys(unitFails) { // the desktop's services stop with its session
+		for _, t := range unitFails[k] {
+			ended := false
 			for _, l := range logouts {
 				if t >= l-30 && t-l <= 180 {
 					ended = true
@@ -305,7 +286,20 @@ func cmdProblems(w io.Writer, args []string) error {
 				atLogout++
 			} else {
 				units[k]++
+				together[t/60] = append(together[t/60], k)
 			}
+		}
+	}
+	var groups []string
+	minutes := make([]int64, 0, len(together))
+	for m := range together {
+		minutes = append(minutes, m)
+	}
+	sort.Slice(minutes, func(i, j int) bool { return minutes[i] < minutes[j] })
+	for _, m := range minutes {
+		if us := together[m]; len(us) >= 3 {
+			groups = append(groups, fmt.Sprintf("  %d services failed in the same minute at %s: %s (a common cause, or a session end that was not recorded)",
+				len(us), time.Unix(m*60, 0).Format("01-02 15:04"), strings.Join(us, ", ")))
 		}
 	}
 	for _, s := range snaps { // which program led at the time of each alert
@@ -348,6 +342,9 @@ func cmdProblems(w io.Writer, args []string) error {
 		any = true
 		fmt.Fprintf(w, "  service %s failed %dx\n", k, units[k])
 	}
+	for _, g := range groups {
+		fmt.Fprintln(w, g)
+	}
 	if n := counts["unexpected_boot"]; n > 0 {
 		any = true
 		fmt.Fprintf(w, "  %d of %d boots followed an end without a recorded shutdown\n", n, counts["boot"])
@@ -370,7 +367,7 @@ func cmdProblems(w io.Writer, args []string) error {
 		}
 	}
 	if atLogout > 0 {
-		fmt.Fprintf(w, "  (%d service failures at the end of a desktop session, or 3 and more in the same minute, are left out: services stop with their session)\n", atLogout)
+		fmt.Fprintf(w, "  (%d service failures at a recorded end of a desktop session or of the system are left out: services stop with their session)\n", atLogout)
 	}
 	if after > 0 {
 		any = true

@@ -36,6 +36,18 @@ type Record struct {
 	Key      string             `json:"key,omitempty"`
 	Val      float64            `json:"val,omitempty"`
 	Secs     int64              `json:"secs,omitempty"`
+	Wt       map[string]float64 `json:"wt,omitempty"`  // summaries: seconds behind a metric, when fewer than Secs
+	Src      string             `json:"src,omitempty"` // long-term records: the day file they come from
+}
+
+// share is the part of a record's length that a metric was read in: 1 for
+// samples, less in a summary when the sensor was missing for a while.
+func (r Record) share(k string) float64 {
+	w, ok := r.Wt[k]
+	if !ok || r.Secs <= 0 {
+		return 1
+	}
+	return min(max(w/float64(r.Secs), 0), 1)
 }
 
 var dayFile = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}\.jsonl$`)

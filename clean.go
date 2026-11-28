@@ -56,7 +56,7 @@ func (r *Record) clean() {
 	for _, l := range [][]proc{r.CPU, r.Mem, r.Watch, r.Services, r.Desktop, r.System} {
 		cleanProcs(l)
 	}
-	r.Avg, r.Max, r.Min, r.Facts = cleanKeys(r.Avg), cleanKeys(r.Max), cleanKeys(r.Min), cleanFacts(r.Facts)
+	r.Avg, r.Max, r.Min, r.Wt, r.Facts = cleanKeys(r.Avg), cleanKeys(r.Max), cleanKeys(r.Min), cleanKeys(r.Wt), cleanFacts(r.Facts)
 }
 
 func (s *State) clean() {

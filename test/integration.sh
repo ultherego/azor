@@ -156,7 +156,7 @@ scenario_longterm() {
 	check "daily summaries written" grep -q '"type":"day"' "$H/state/azor/history.jsonl"
 	check "events kept" grep -q '"kind":"package"' "$H/state/azor/history.jsonl"
 	local r; r=$(az range "$(date -d '-80 hours' '+%F %H:%M')" "$(date -d '-74 hours' '+%F %H:%M')")
-	check "range for an old period has data" grep -q 'hourly summaries' <<<"$r"
+	check "range for an old period has data" grep -qE '[0-9]+ hourly or daily summaries' <<<"$r"
 	local c; c=$(az compare update)
 	echo "$c" | sed 's/^/      /' | head -12
 	check "compare finds the update" grep -q 'linux-test\|upgraded 3' <<<"$c"
@@ -209,7 +209,7 @@ P
 	check "the removed day was summed up first" grep -q '"type":"hour"' "$H/state/azor/history.jsonl"
 	check "status shows the share of the limit" grep -qE 'disk limit: [0-9]+% of max_disk = 10 MB' <<<"$(az status)"
 	local r; r=$(az range "$(date -d '-3 days -6 hours' '+%F %H:%M')" "$(date -d '-3 days -2 hours' '+%F %H:%M')")
-	check "a removed day still answers from hourly summaries" grep -q 'hourly summaries' <<<"$r"
+	check "a removed day still answers from hourly summaries" grep -qE '[0-9]+ hourly or daily summaries' <<<"$r"
 	local n; n=$(count 'SPACE')
 	start
 	local b; b=$(az brief)

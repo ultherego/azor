@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,7 +26,7 @@ const (
 
 // longEvents are the events kept beyond the retention.
 var longEvents = map[string]bool{"boot": true, "unexpected_boot": true, "interrupted": true, "suspend": true, "gap": true,
-	"lost": true, "shutdown": true, "package": true, "alert": true, "clear": true, "timer": true, "unit": true,
+	"lost": true, "shutdown": true, "stop": true, "package": true, "alert": true, "clear": true, "timer": true, "unit": true,
 	"desktop": true, "health": true, "fact": true, "space": true}
 
 // span sums samples over one hour or one day.
@@ -42,8 +44,9 @@ func newSpan(end int64) *span {
 func (s *span) add(r Record, secs float64) {
 	s.secs += secs
 	for k, v := range r.Avg {
-		s.sum[k] += v * secs
-		s.wt[k] += secs
+		f := secs * r.share(k)
+		s.sum[k] += v * f
+		s.wt[k] += f
 		if l, ok := s.lo[k]; !ok || v < l {
 			s.lo[k] = v
 		}
@@ -62,6 +65,12 @@ func (s *span) record(kind string) Record {
 	for k, w := range s.wt {
 		if w > 0 {
 			r.Avg[k], r.Min[k], r.Max[k] = round1(s.sum[k]/w), round1(s.lo[k]), round1(s.hi[k])
+			if w < s.secs-0.5 { // the sensor was missing for part of the span
+				if r.Wt == nil {
+					r.Wt = map[string]float64{}
+				}
+				r.Wt[k] = math.Round(w)
+			}
 		}
 	}
 	return r
@@ -164,11 +173,61 @@ func sumUp(dir, name string, interval float64) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if err := appendAll(filepath.Join(dir, historyFile), recs); err != nil {
+	path := filepath.Join(dir, historyFile)
+	if err := dropTail(path, name); err != nil { // a copy left by an interrupted earlier try
+		return false, err
+	}
+	for i := range recs {
+		recs[i].Src = name
+	}
+	if err := appendAll(path, recs); err != nil {
 		return false, err // the day file stays; it is tried again next time
 	}
 	st.Done = name
 	return true, writeAtomic(filepath.Join(dir, "longterm.json"), st)
+}
+
+// dropTail cuts the long-term file before the first record copied from the
+// day file src, and after its last complete line. Day files are summed up in
+// order, so a copy of src can only be at the end. Summing up the same day
+// again then gives the same file instead of counting it twice.
+func dropTail(path, src string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	defer f.Close()
+	cut, end := int64(-1), int64(0)
+	mark := []byte(`"src":"` + src + `"}`) // the last field of a record
+	rd := bufio.NewReaderSize(f, 64<<10)
+	var tail []byte // the end of the current line, also of a long one
+	for off := int64(0); ; {
+		chunk, err := rd.ReadSlice('\n')
+		off += int64(len(chunk))
+		tail = append(tail, chunk...)
+		if len(tail) > 2*len(mark) {
+			tail = append(tail[:0], tail[len(tail)-2*len(mark):]...)
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if err != nil { // the end; a last line without a newline is torn
+			break
+		}
+		if cut < 0 && bytes.HasSuffix(bytes.TrimRight(tail, "\n"), mark) {
+			cut = end
+		}
+		end, tail = off, tail[:0]
+	}
+	if cut < 0 {
+		cut = end
+	}
+	if i, err := f.Stat(); err != nil || i.Size() == cut {
+		return err
+	}
+	return f.Truncate(cut)
 }
 
 // diskUse is the size of the day files and of the long-term history.
@@ -334,7 +393,8 @@ func trimHistory(path string, now time.Time, snapDays int) error {
 	if err != nil {
 		return err
 	}
-	hours, rest := now.AddDate(0, 0, -keepHours).Unix(), now.AddDate(0, 0, -keepDays).Unix()
+	// hours go by whole days, so that a day has all its hours or its daily summary
+	hours, rest := dayStart(now.AddDate(0, 0, -keepHours).Unix()), now.AddDate(0, 0, -keepDays).Unix()
 	snaps := now.AddDate(0, 0, -snapDays).Unix()
 	w := bufio.NewWriter(out)
 	sc := bufio.NewScanner(in)
@@ -347,16 +407,25 @@ func trimHistory(path string, now time.Time, snapDays int) error {
 		if json.Unmarshal(sc.Bytes(), &r) != nil {
 			continue
 		}
-		if r.Type == "hour" && r.T < hours || r.Type == "snapshot" && r.T < snaps || r.T < rest {
+		if r.Type == "hour" && dayStart(r.T-1) < hours || r.Type == "snapshot" && r.T < snaps || r.T < rest {
 			continue
 		}
 		w.Write(append(append([]byte{}, sc.Bytes()...), '\n'))
 	}
-	if err := w.Flush(); err != nil {
+	if err := sc.Err(); err != nil { // do not put a partly read file in place
 		out.Close()
+		os.Remove(tmp)
 		return err
 	}
-	out.Close()
+	if err := w.Flush(); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
 	return os.Rename(tmp, path)
 }
 
@@ -394,6 +463,95 @@ func rawSince(dir string) time.Time {
 		return time.Now()
 	}
 	return t
+}
+
+// dayStart is the local midnight that begins the day of t.
+func dayStart(t int64) int64 {
+	y, m, d := time.Unix(t, 0).Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.Local).Unix()
+}
+
+// loadSummaries streams the long-term summaries that reach into from..to with
+// their length: hourly ones, and daily ones for the days whose hours are gone.
+// Hours are trimmed by whole days, so a day is never counted from both.
+func loadSummaries(dir string, from, to time.Time, fn func(r Record, length float64)) error {
+	hasHours := map[int64]bool{}
+	hi := to.Add(24 * time.Hour) // a summary is stored at its end
+	if err := loadLong(dir, from, hi, func(r Record) {
+		if r.Type == "hour" {
+			hasHours[dayStart(r.T-1)] = true
+		}
+	}); err != nil {
+		return err
+	}
+	return loadLong(dir, from, hi, func(r Record) {
+		switch r.Type {
+		case "hour":
+			fn(r, 3600)
+		case "day":
+			if s := dayStart(r.T - 1); !hasHours[s] {
+				fn(r, float64(r.T-s))
+			}
+		}
+	})
+}
+
+// cutsSpan tells whether an event ends the run of samples before it, so the
+// next sample's length is not measured across the break.
+func cutsSpan(kind string) bool {
+	switch kind {
+	case "gap", "start", "lost", "boot", "interrupted", "suspend":
+		return true
+	}
+	return false
+}
+
+// readHistory is the one way the commands read a range of history. Samples
+// come from the day files; before the oldest day file, the hourly summaries,
+// or the daily ones where the hours are gone; events and snapshots come from
+// both stores without doubles. fn gets each record with the length of time it
+// stands for and the scale of that length that has data (1 for a sample; for
+// a summary, its recorded seconds over its length), so the weight of a
+// record in any window is overlap(r.T, length, window) * scale. Events and
+// other records get length 0. It reports whether summaries were used.
+func readHistory(dir string, from, to time.Time, interval float64, fn func(r Record, length, scale float64, sure bool)) (summaries bool, err error) {
+	edge := rawSince(dir)
+	if from.Before(edge) {
+		end := minTime(to, edge)
+		if err = loadSummaries(dir, from, end, func(r Record, length float64) {
+			if r.Secs > 0 && length > 0 && overlap(r.T, length, from, end) > 0 {
+				summaries = true
+				fn(r, length, min(float64(r.Secs)/length, 1), true)
+			}
+		}); err != nil {
+			return
+		}
+		if err = loadLong(dir, from, minTime(to, edge.Add(-time.Second)), func(r Record) {
+			if r.Type == "event" || r.Type == "snapshot" {
+				fn(r, 0, 0, true)
+			}
+		}); err != nil {
+			return
+		}
+	}
+	sp := &spans{fallback: interval}
+	// A sample is stored at its end, so one that ends after the range may still
+	// cover part of it.
+	err = load(dir, maxTime(from, edge), to.Add(10*time.Minute), func(r Record) {
+		if r.Type == "sample" {
+			if secs, sure := sp.next(r); overlap(r.T, secs, from, to) > 0 {
+				fn(r, secs, 1, sure)
+			}
+			return
+		}
+		if r.Type == "event" && cutsSpan(r.Kind) {
+			sp.cut()
+		}
+		if r.T <= to.Unix() {
+			fn(r, 0, 0, true)
+		}
+	})
+	return
 }
 
 // loadAll gives events and snapshots from both stores without counting any

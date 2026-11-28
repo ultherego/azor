@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1417,7 +1418,8 @@ func TestProblemsLeaveOutSessionEnds(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	os.MkdirAll(dataDir(), 0o700)
 	at := time.Now().Add(-time.Hour).Unix()
-	for _, u := range []string{"a.service", "b.service", "c.service"} { // a logout without a desktop event (e.g. X11)
+	appendRecord(dataDir(), Record{T: at - 5, Type: "event", Kind: "stop"}) // Azor stopped with the session (e.g. X11)
+	for _, u := range []string{"a.service", "b.service", "c.service"} {
 		appendRecord(dataDir(), Record{T: at, Type: "event", Kind: "unit", Key: u, New: "failed"})
 	}
 	appendRecord(dataDir(), Record{T: at - 600, Type: "event", Kind: "unit", Key: "backup.service", New: "failed"}) // a real failure
@@ -1427,6 +1429,25 @@ func TestProblemsLeaveOutSessionEnds(t *testing.T) {
 	}
 	out := w.String()
 	if !strings.Contains(out, "backup.service failed 1x") || strings.Contains(out, "a.service") || !strings.Contains(out, "(3 service failures") {
+		t.Fatal(out)
+	}
+}
+
+func TestProblemsKeepFailuresTogether(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	os.MkdirAll(dataDir(), 0o700)
+	at := time.Now().Add(-time.Hour).Truncate(time.Minute).Unix() + 5
+	for _, u := range []string{"a.service", "b.service", "c.service"} { // no session end recorded
+		appendRecord(dataDir(), Record{T: at, Type: "event", Kind: "unit", Key: u, New: "failed"})
+	}
+	var w strings.Builder
+	if err := cmdProblems(&w, []string{"1d"}); err != nil {
+		t.Fatal(err)
+	}
+	out := w.String()
+	if !strings.Contains(out, "a.service failed 1x") || !strings.Contains(out, "3 services failed in the same minute") ||
+		!strings.Contains(out, "a.service, b.service, c.service") || strings.Contains(out, "left out") {
 		t.Fatal(out)
 	}
 }
@@ -1652,5 +1673,191 @@ func TestCompareIdleNote(t *testing.T) {
 	printCompare(&b, "t", mk(7200), mk(3600))
 	if strings.Contains(b.String(), "need 10 minutes") || !strings.Contains(b.String(), "40.0        40.0") {
 		t.Fatal(b.String())
+	}
+}
+
+func writeDay(t *testing.T, dir, name string, recs []Record) {
+	t.Helper()
+	var b strings.Builder
+	for _, r := range recs {
+		r.V = schema
+		j, _ := json.Marshal(r)
+		b.Write(append(j, '\n'))
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSumUpTwiceCountsOnce(t *testing.T) {
+	dir := t.TempDir()
+	day := time.Date(2026, 1, 10, 12, 0, 0, 0, time.Local)
+	writeDay(t, dir, "2026-01-10.jsonl", []Record{
+		{T: day.Unix(), Type: "sample", Secs: 10, Avg: map[string]float64{"cpu.load": 5}},
+		{T: day.Unix() + 10, Type: "sample", Secs: 10, Avg: map[string]float64{"cpu.load": 7}},
+		{T: day.Unix() + 20, Type: "event", Kind: "boot", Secs: 30},
+	})
+	if done, err := sumUp(dir, "2026-01-10.jsonl", 10); err != nil || !done {
+		t.Fatal(done, err)
+	}
+	path := filepath.Join(dir, historyFile)
+	first, _ := os.ReadFile(path)
+	// an interrupted earlier try: the copy was written, the state was not, and a torn line follows
+	os.Remove(filepath.Join(dir, "longterm.json"))
+	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	f.WriteString(`{"v":1,"t":12`)
+	f.Close()
+	if done, err := sumUp(dir, "2026-01-10.jsonl", 10); err != nil || !done {
+		t.Fatal(done, err)
+	}
+	again, _ := os.ReadFile(path)
+	if string(again) != string(first) {
+		t.Fatalf("not the same file:\n%s\n---\n%s", first, again)
+	}
+	if done, _ := sumUp(dir, "2026-01-10.jsonl", 10); done {
+		t.Fatal("summed up a third time")
+	}
+}
+
+func TestDropTailKeepsOtherDays(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, historyFile)
+	long := strings.Repeat("x", 200<<10) // longer than the read buffer
+	recs := []Record{
+		{T: 1, Type: "hour", Src: "2026-01-09.jsonl"},
+		{T: 2, Type: "snapshot", Key: long, Src: "2026-01-09.jsonl"},
+		{T: 3, Type: "hour"}, // an older record without a source
+		{T: 4, Type: "snapshot", Key: long, Src: "2026-01-10.jsonl"},
+		{T: 5, Type: "hour", Src: "2026-01-10.jsonl"},
+	}
+	if err := appendAll(path, recs[:3]); err != nil {
+		t.Fatal(err)
+	}
+	keep, _ := os.ReadFile(path)
+	appendAll(path, recs[3:])
+	if err := dropTail(path, "2026-01-10.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(keep) {
+		t.Fatalf("kept %d bytes, want %d", len(got), len(keep))
+	}
+	if err := dropTail(path, "2026-01-11.jsonl"); err != nil { // nothing of that day: unchanged
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(keep) {
+		t.Fatal("changed without a copy of the day")
+	}
+}
+
+func TestSummaryWeightsEachMetric(t *testing.T) {
+	// hour 1: power read for 10 s only, at 100 W; hour 2: read all hour at 10 W
+	h1 := newSpan(3600)
+	h1.add(Record{Avg: map[string]float64{"cpu.load": 1, "gpu.power": 100}}, 10)
+	h1.add(Record{Avg: map[string]float64{"cpu.load": 1}}, 3590)
+	h2 := newSpan(7200)
+	h2.add(Record{Avg: map[string]float64{"cpu.load": 1, "gpu.power": 10}}, 3600)
+	r1, r2 := h1.record("hour"), h2.record("hour")
+	if r1.Wt["gpu.power"] != 10 || r1.Wt["cpu.load"] != 0 || r2.Wt != nil {
+		t.Fatal(r1.Wt, r2.Wt)
+	}
+	s := newSummary()
+	s.add(r1, float64(r1.Secs))
+	s.add(r2, float64(r2.Secs))
+	if got := s.sum["gpu.power"] / s.wt["gpu.power"]; got < 10.2 || got > 10.3 {
+		t.Fatal(got)
+	}
+	sp := newSpan(7200)
+	sp.add(r1, float64(r1.Secs))
+	sp.add(r2, float64(r2.Secs))
+	if got := sp.sum["gpu.power"] / sp.wt["gpu.power"]; got < 10.2 || got > 10.3 {
+		t.Fatal(got)
+	}
+}
+
+func TestTrimHistoryKeepsFileOnReadError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, historyFile)
+	line := `{"v":1,"t":` + strconv.FormatInt(time.Now().Unix(), 10) + `,"type":"hour","key":"` + strings.Repeat("y", 5<<20) + `"}` + "\n"
+	os.WriteFile(path, []byte(`{"v":1,"t":1,"type":"hour"}`+"\n"+line), 0o600)
+	before, _ := os.ReadFile(path)
+	if err := trimHistory(path, time.Now(), 30); err == nil {
+		t.Fatal("a line over the scanner limit should fail")
+	}
+	if after, _ := os.ReadFile(path); len(after) != len(before) {
+		t.Fatal("file replaced after a read error")
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Fatal("temporary file left")
+	}
+}
+
+func TestReadHistoryJoinsStores(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := dataDir()
+	os.MkdirAll(dir, 0o700)
+	d3 := time.Unix(dayStart(time.Now().Add(-time.Minute).Unix()), 0) // today: the day file
+	d1, d2 := d3.AddDate(0, 0, -2), d3.AddDate(0, 0, -1)
+	long := []Record{
+		{T: d2.Unix(), Type: "day", Secs: 86400, Avg: map[string]float64{"cpu": 10}, Src: "2026-01-01.jsonl"}, // its hours are gone
+		{T: d2.Unix() + 3600, Type: "hour", Secs: 3600, Avg: map[string]float64{"cpu": 50}, Src: "2026-01-02.jsonl"},
+		{T: d2.Unix() + 7200, Type: "hour", Secs: 1800, Avg: map[string]float64{"cpu": 50}, Src: "2026-01-02.jsonl"},
+		{T: d2.Unix() + 600, Type: "event", Kind: "boot", Secs: 30, Src: "2026-01-02.jsonl"},
+		{T: d3.Unix(), Type: "day", Secs: 5400, Avg: map[string]float64{"cpu": 99}, Src: "2026-01-02.jsonl"}, // its hours are kept
+	}
+	if err := appendAll(filepath.Join(dir, historyFile), long); err != nil {
+		t.Fatal(err)
+	}
+	writeDay(t, dir, d3.Format("2006-01-02")+".jsonl", []Record{
+		{T: d3.Unix() + 10, Type: "sample", Secs: 10, Avg: map[string]float64{"cpu": 20}},
+		{T: d3.Unix() + 20, Type: "sample", Secs: 10, Avg: map[string]float64{"cpu": 20}},
+	})
+	weights, events := map[string]float64{}, 0
+	end := d3.Add(30 * time.Second)
+	used, err := readHistory(dir, d1, end, 10, func(r Record, length, scale float64, _ bool) {
+		if r.Type == "event" {
+			events++
+			return
+		}
+		weights[r.Type] += overlap(r.T, length, d1, end) * scale
+		if r.Avg["cpu"] == 99 {
+			t.Error("a day counted from its hours and its daily summary")
+		}
+	})
+	if err != nil || !used {
+		t.Fatal(used, err)
+	}
+	if weights["day"] != 86400 || weights["hour"] != 5400 || weights["sample"] != 20 || events != 1 {
+		t.Fatal(weights, events)
+	}
+	var w strings.Builder
+	if err := cmdRange(&w, []string{d1.Format("2006-01-02 15:04"), "now"}); err != nil {
+		t.Fatal(err)
+	}
+	if out := w.String(); !strings.Contains(out, "2 samples and 3 hourly or daily summaries") || !strings.Contains(out, "computer off") {
+		t.Fatal(out)
+	}
+	w.Reset()
+	if err := cmdEvents(&w, []string{"3d"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(w.String(), "BOOT") {
+		t.Fatal(w.String())
+	}
+}
+
+func TestTrimHistoryHoursByWholeDays(t *testing.T) {
+	path := filepath.Join(t.TempDir(), historyFile)
+	now := time.Date(2026, 3, 1, 15, 0, 0, 0, time.Local)
+	cut := now.AddDate(0, 0, -keepHours)
+	early, late := dayStart(cut.Unix())+3600, cut.Unix()+3600 // same day as the cut, before and after it
+	appendAll(path, []Record{{T: early, Type: "hour"}, {T: late, Type: "hour"}, {T: dayStart(cut.Unix()) - 3600, Type: "hour"}})
+	if err := trimHistory(path, now, 30); err != nil {
+		t.Fatal(err)
+	}
+	var kept []int64
+	loadLong(filepath.Dir(path), time.Unix(0, 0), now, func(r Record) { kept = append(kept, r.T) })
+	if len(kept) != 2 || kept[0] != early || kept[1] != late {
+		t.Fatal(kept)
 	}
 }

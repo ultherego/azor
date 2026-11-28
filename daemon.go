@@ -541,6 +541,12 @@ func runDaemon() error {
 				fired = append(fired, e.Key)
 			}
 		}
+		st.Alerts = nil // this cycle's alerts, also for a snapshot taken now
+		for _, r := range al.rules {
+			if x := al.m[r.Key]; x != nil && x.active {
+				st.Alerts = append(st.Alerts, r.Key)
+			}
+		}
 		if cfg.on("snapshots") {
 			if why, ok := snaps.due(now, fired); ok {
 				st.Values = avg
@@ -575,12 +581,7 @@ func runDaemon() error {
 			cur.Last = now.Unix() // so that the next start knows how far this run got
 			saveSession(dir, cur)
 		}
-		st.T, st.Values, st.Alerts = now.Unix(), avg, nil
-		for _, r := range al.rules {
-			if x := al.m[r.Key]; x != nil && x.active {
-				st.Alerts = append(st.Alerts, r.Key)
-			}
-		}
+		st.T, st.Values = now.Unix(), avg
 		st.clean()
 		if err := writeAtomic(stateFile(), st); err != nil {
 			fmt.Fprintln(os.Stderr, "azor: state:", err)
