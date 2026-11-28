@@ -14,6 +14,7 @@ install: test build
 	systemctl --user daemon-reload
 	systemctl --user enable azor.service
 	systemctl --user restart azor.service
+	$(BIN) install-skill
 # Recorded data in ~/.local/state/azor is kept; remove it by hand if wanted.
 uninstall:
 	-systemctl --user disable --now azor.service

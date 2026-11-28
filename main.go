@@ -29,6 +29,7 @@ Usage:
   azor health               detected health checks and problems
   azor timers               scheduled jobs and their last result
   azor init                 create ~/.config/azor/azor.conf
+  azor install-skill        put the Claude Code skill in ~/.claude/skills/azor
   azor files                detected configuration files
   azor config               effective configuration
   azor daemon               run the collector (used by systemd)
@@ -97,6 +98,8 @@ func main() {
 		err = cmdTimers(os.Stdout)
 	case "init":
 		err = cmdInit(os.Stdout)
+	case "install-skill":
+		err = cmdInstallSkill(os.Stdout)
 	case "files":
 		err = cmdFiles(os.Stdout)
 	case "config":

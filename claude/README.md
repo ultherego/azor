@@ -1,11 +1,10 @@
 # Connecting Azor to Claude Code
 
-Run these from this directory.
-
 Skill (Claude queries history when it is relevant):
 
-    mkdir -p ~/.claude/skills
-    ln -s "$PWD/azor" ~/.claude/skills/azor
+    azor install-skill
+
+It writes the skill built into the binary to `~/.claude/skills/azor/SKILL.md` (or under `$CLAUDE_CONFIG_DIR`), replaces a link left by an older setup, and never overwrites a `SKILL.md` that is not Azor's. `make install` runs it, so the skill matches the installed version; after a package update, run it again. It also prints the hook below with the path of the binary.
 
 Hook (one line of current state when a session starts). Merge into `~/.claude/settings.json`:
 

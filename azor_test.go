@@ -1568,3 +1568,69 @@ func TestGapCauses(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallSkill(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	p := filepath.Join(home, ".claude", "skills", "azor", "SKILL.md")
+	var out bytes.Buffer
+	if err := cmdInstallSkill(&out); err != nil || !strings.Contains(out.String(), "installed") || !strings.Contains(out.String(), `brief 2>/dev/null || true`) {
+		t.Fatal(err, out.String())
+	}
+	if b, _ := os.ReadFile(p); !bytes.Equal(b, skillText) || !isAzorSkill(b) {
+		t.Fatal("not the built-in skill")
+	}
+	out.Reset()
+	if cmdInstallSkill(&out); !strings.Contains(out.String(), "up to date") {
+		t.Fatal(out.String())
+	}
+	os.WriteFile(p, []byte("---\nname: azor\ndescription: old\n---\nold text\n"), 0o644) // an older version
+	out.Reset()
+	if err := cmdInstallSkill(&out); err != nil || !strings.Contains(out.String(), "installed") {
+		t.Fatal(err, out.String())
+	}
+	if b, _ := os.ReadFile(p); !bytes.Equal(b, skillText) {
+		t.Fatal("older version not updated")
+	}
+	os.WriteFile(p, []byte("---\nname: other\n---\nmine\n"), 0o644) // someone else's
+	if err := cmdInstallSkill(io.Discard); err == nil {
+		t.Fatal("a foreign SKILL.md overwritten")
+	}
+	if b, _ := os.ReadFile(p); string(b) != "---\nname: other\n---\nmine\n" {
+		t.Fatal("foreign file changed")
+	}
+
+	// an old link to a checkout: the link goes, its target stays
+	home = t.TempDir()
+	t.Setenv("HOME", home)
+	target := filepath.Join(home, "checkout", "azor")
+	os.MkdirAll(target, 0o755)
+	os.WriteFile(filepath.Join(target, "SKILL.md"), []byte("---\nname: azor\n---\nfrom the checkout\n"), 0o644)
+	os.MkdirAll(filepath.Join(home, ".claude", "skills"), 0o755)
+	link := filepath.Join(home, ".claude", "skills", "azor")
+	os.Symlink(target, link)
+	out.Reset()
+	if err := cmdInstallSkill(&out); err != nil || !strings.Contains(out.String(), "removed the old link") {
+		t.Fatal(err, out.String())
+	}
+	if i, err := os.Lstat(link); err != nil || !i.IsDir() {
+		t.Fatal("link not replaced by a directory", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(target, "SKILL.md")); string(b) != "---\nname: azor\n---\nfrom the checkout\n" {
+		t.Fatal("the link target was changed")
+	}
+
+	// CLAUDE_CONFIG_DIR moves the whole configuration
+	cfg := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
+	if err := cmdInstallSkill(io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg, "skills", "azor", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	if isAzorSkill([]byte("name: azor\n")) || isAzorSkill([]byte("---\nname: azorx\n---\n")) {
+		t.Fatal("front matter check too loose")
+	}
+}

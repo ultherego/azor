@@ -245,6 +245,17 @@ scenario_journal() {
 	check "health has the journal kept check" grep -qE '^  journal_kept +(under 1 day|1 to 7 days|7 to 30 days|over 30 days)|Not available here:.*journal_kept' <<<"$h"
 }
 
+scenario_skill() {
+	echo "== install-skill: a plain file, the same as the skill in the repository"
+	setup skill
+	local o; o=$(az install-skill)
+	check "the skill file is installed" cmp -s "$H/.claude/skills/azor/SKILL.md" claude/azor/SKILL.md
+	check "a second run changes nothing" grep -q 'up to date' <<<"$(az install-skill)"
+	local hook; hook=$(sed -n '/"hooks": {/,/} ] } ] }/p' <<<"$o")
+	check "the printed hook is valid JSON with the full path" python3 -c "import json,sys; h=json.loads('{'+sys.argv[1]+'}'); c=h['hooks']['SessionStart'][0]['hooks'][0]['command']; assert c.startswith('\"/') and c.endswith('brief 2>/dev/null || true'), c" "$hook"
+	check "settings.json is not created" test ! -e "$H/.claude/settings.json"
+}
+
 json_ok() { python3 -c "import json,sys; d=json.load(sys.stdin); assert d['azor_json']==1 and d['kind']=='$1', d.get('kind'); $2"; }
 
 scenario_json() {
@@ -260,7 +271,7 @@ scenario_json() {
 }
 
 scenarios=("$@")
-[ ${#scenarios[@]} -eq 0 ] && scenarios=(stop_start interrupted boot suspend snapshot snapshot_config longterm space journal compare_raw json)
+[ ${#scenarios[@]} -eq 0 ] && scenarios=(stop_start interrupted boot suspend snapshot snapshot_config longterm space journal skill compare_raw json)
 for s in "${scenarios[@]}"; do "scenario_$s"; done
 echo "passed $pass, failed $fail"
 [ "$fail" -eq 0 ]
