@@ -130,6 +130,7 @@ for t in range(upd - 30 * 3600, upd + 30 * 3600, 60):
     hot = 8 if t >= upd else 0                  # idle CPU 8 C warmer after it
     put({'t': t, 'type': 'sample', 'secs': 60, 'avg': {'cpu': 5, 'cpu_temp': 40 + hot, 'mem': 30}, 'max': {'cpu': 9}})
 put({'t': upd, 'type': 'event', 'kind': 'package', 'key': 'upgraded 3', 'new': 'linux-test'})
+put({'t': upd + 7200, 'type': 'event', 'kind': 'package', 'key': 'installed 1', 'new': 'some-app'})  # not an update
 for i in range(3):
     a = upd + 3600 * (i + 1)
     put({'t': a, 'type': 'event', 'kind': 'alert', 'key': 'psi_memory', 'val': 30})

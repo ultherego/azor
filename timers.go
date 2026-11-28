@@ -151,10 +151,12 @@ func readTimers(ignore []string) (out []timer, ok bool, unknown []string) {
 	return
 }
 
-// fromTrigger tells whether the service started with this trigger. systemd
-// starts it right away; a start much later belongs to another trigger.
+// fromTrigger tells whether the service started with this trigger. It can
+// start later than the trigger when it waits for its dependencies, e.g. the
+// network at boot with Persistent=true; a start much later belongs to another
+// trigger or to a manual start.
 func fromTrigger(last, started int64) bool {
-	return started == 0 || last == 0 || (started >= last-60 && started <= last+60)
+	return started == 0 || last == 0 || (started >= last-60 && started <= last+600)
 }
 
 // mergeTimers keeps what was known before for what cannot be read now: the

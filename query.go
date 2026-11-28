@@ -1008,7 +1008,13 @@ func brief(s State, now time.Time, events func(time.Time, func(Record)) error) s
 	if f := failedTimers(s.Timers); len(f) > 0 {
 		parts = append(parts, "FAILED TIMERS "+strings.Join(f, ", "))
 	}
-	if u := unsure(s.Timers); len(u) > 0 {
+	var recent []timer // a monthly job unknown since its last run is not news every day
+	for _, t := range s.Timers {
+		if t.Last == 0 || now.Unix()-t.Last < 2*86400 {
+			recent = append(recent, t)
+		}
+	}
+	if u := unsure(recent); len(u) > 0 {
 		parts = append(parts, "timers with unknown result now "+strings.Join(u, ", "))
 	}
 	if s.WriteSince > 0 {

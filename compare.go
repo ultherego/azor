@@ -138,7 +138,8 @@ func cmdCompare(w io.Writer, args []string) error {
 		var at time.Time
 		var what string
 		if err := loadAll(dir, now.AddDate(0, 0, -keepDays), now, func(r Record) {
-			if r.Type == "event" && (r.Kind == "package" || r.Kind == "fact" && r.Key == "kernel") {
+			// upgrades and kernel changes; installing a new program is not an update of the system
+			if r.Type == "event" && (r.Kind == "package" && strings.Contains(r.Key, "upgraded") || r.Kind == "fact" && r.Key == "kernel") {
 				at, what = time.Unix(r.T, 0), r.Key
 				if r.Kind == "fact" {
 					what = "kernel " + safeName(r.Old) + " -> " + safeName(r.New)
@@ -282,9 +283,15 @@ func cmdProblems(w io.Writer, args []string) error {
 		return err
 	}
 	atLogout := 0
+	together := map[int64]int{} // a session end stops many services at once
+	for _, ts := range unitFails {
+		for _, t := range ts {
+			together[t/60]++
+		}
+	}
 	for k, ts := range unitFails { // the desktop's services stop with its session
 		for _, t := range ts {
-			ended := false
+			ended := together[t/60] >= 3
 			for _, l := range logouts {
 				if t >= l-30 && t-l <= 180 {
 					ended = true
@@ -360,7 +367,7 @@ func cmdProblems(w io.Writer, args []string) error {
 		}
 	}
 	if atLogout > 0 {
-		fmt.Fprintf(w, "  (%d service failures at the end of a desktop session are left out: its services stop with it)\n", atLogout)
+		fmt.Fprintf(w, "  (%d service failures at the end of a desktop session, or 3 and more in the same minute, are left out: services stop with their session)\n", atLogout)
 	}
 	if after > 0 {
 		any = true

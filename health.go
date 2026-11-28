@@ -48,6 +48,12 @@ func newHealth(root string) *health {
 		}
 		h.found[c.name] = ok
 	}
+	// Right after boot, systemd cannot tell the boot time until every startup
+	// job has ended (a catch-up backup can take minutes): that is "not yet",
+	// not "not available here".
+	if _, err := exec.LookPath("systemd-analyze"); err == nil && h.root == "" {
+		h.found["boot_time"] = true
+	}
 	return h
 }
 

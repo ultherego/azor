@@ -997,9 +997,10 @@ func TestWriteFailureIsVisible(t *testing.T) {
 }
 
 func TestUnknownIsNotGood(t *testing.T) {
-	prev := []timer{{Name: "backup", Unit: "backup.service", Last: 9, Result: "exit-code"}, {Name: "snap", User: true, Last: 9, Result: "success"}}
+	r := time.Now().Unix() - 3600 // a recent run
+	prev := []timer{{Name: "backup", Unit: "backup.service", Last: r, Result: "exit-code"}, {Name: "snap", User: true, Last: r, Result: "success"}}
 	// the result of a known timer cannot be read now
-	now := []timer{{Name: "backup", Unit: "backup.service", Last: 9, Result: "unavailable"}}
+	now := []timer{{Name: "backup", Unit: "backup.service", Last: r, Result: "unavailable"}}
 	got := mergeTimers(prev, now, []string{"user timers"}, nil)
 	if len(got) != 2 || got[0].Result != "exit-code" || !got[0].Stale || len(unsure(got)) != 2 || strings.Join(failedTimers(got), "") != "backup (last known)" {
 		t.Fatalf("%+v", got)
@@ -1076,10 +1077,11 @@ func TestBriefResistsInjection(t *testing.T) {
 }
 
 func TestTimersAfterBoot(t *testing.T) {
-	known := map[string]run{"backup": {"failed: exit-code", 9}, "snap": {"ok", 9}, "moved": {"ok", 5}}
-	now := []timer{{Name: "backup", Last: 9, Result: "unknown"}, {Name: "snap", Last: 9, Result: "unknown"},
-		{Name: "moved", Last: 7, Result: "unknown"}, // ran again while Azor was away
-		{Name: "new", Last: 9, Result: "unknown"}, {Name: "first", Result: "unknown"}, {Name: "fine", Last: 9, Result: "success"}}
+	r := time.Now().Unix() - 3600 // a recent run
+	known := map[string]run{"backup": {"failed: exit-code", r}, "snap": {"ok", r}, "moved": {"ok", r - 60}}
+	now := []timer{{Name: "backup", Last: r, Result: "unknown"}, {Name: "snap", Last: r, Result: "unknown"},
+		{Name: "moved", Last: r - 30, Result: "unknown"}, // ran again while Azor was away
+		{Name: "new", Last: r, Result: "unknown"}, {Name: "first", Result: "unknown"}, {Name: "fine", Last: r, Result: "success"}}
 	got := mergeTimers(nil, now, nil, known)
 	if f := strings.Join(failedTimers(got), ","); f != "backup (last known)" {
 		t.Fatal(f)
@@ -1095,7 +1097,7 @@ func TestTimersAfterBoot(t *testing.T) {
 		t.Fatal(b)
 	}
 	var w strings.Builder
-	cmdNowTimers(&w, []timer{{Name: "snap", Last: 9, Result: "success", Before: true}, {Name: "fine", Last: 9, Result: "success"}})
+	cmdNowTimers(&w, []timer{{Name: "snap", Last: r, Result: "success", Before: true}, {Name: "fine", Last: r, Result: "success"}})
 	if !strings.Contains(w.String(), "1 confirmed since boot") {
 		t.Fatal(w.String())
 	}
@@ -1175,7 +1177,7 @@ func TestFileCacheIsApart(t *testing.T) {
 }
 
 func TestServiceRunBelongsToItsTimer(t *testing.T) {
-	const nightly = 57600 // 16:00
+	nightly := time.Now().Unix() - 7200 // two hours ago
 	if !fromTrigger(nightly, nightly+1) || fromTrigger(nightly, nightly+3600) || fromTrigger(nightly, nightly-3600) {
 		t.Fatal("trigger matching")
 	}
@@ -1197,6 +1199,15 @@ func TestServiceRunBelongsToItsTimer(t *testing.T) {
 	b := brief(State{Timers: got}, time.Now(), func(time.Time, func(Record)) error { return nil })
 	if strings.Contains(b, "no problems") {
 		t.Fatal(b)
+	}
+	// a run more than two days ago with an unknown result: shown by azor timers, not repeated in the brief
+	old := []timer{{Name: "monthly", Last: time.Now().Unix() - 20*86400, Result: "unknown"}}
+	if b := brief(State{Timers: old}, time.Now(), func(time.Time, func(Record)) error { return nil }); strings.Contains(b, "monthly") || len(unsure(old)) != 1 {
+		t.Fatal(b)
+	}
+	// a service waiting for the network at boot is still this trigger's run; an hour later is not
+	if !fromTrigger(nightly, nightly+300) || fromTrigger(nightly, nightly+3600) {
+		t.Fatal("trigger window")
 	}
 }
 
@@ -1287,5 +1298,24 @@ func TestSleepWatch(t *testing.T) {
 	os.WriteFile(filepath.Join(d, "uptime"), []byte("401.0 1"), 0o600) // jitter, not a suspend
 	if s := w.slept(); s != 0 {
 		t.Fatal(s)
+	}
+}
+
+func TestProblemsLeaveOutSessionEnds(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	os.MkdirAll(dataDir(), 0o700)
+	at := time.Now().Add(-time.Hour).Unix()
+	for _, u := range []string{"a.service", "b.service", "c.service"} { // a logout without a desktop event (e.g. X11)
+		appendRecord(dataDir(), Record{T: at, Type: "event", Kind: "unit", Key: u, New: "failed"})
+	}
+	appendRecord(dataDir(), Record{T: at - 600, Type: "event", Kind: "unit", Key: "backup.service", New: "failed"}) // a real failure
+	var w strings.Builder
+	if err := cmdProblems(&w, []string{"1d"}); err != nil {
+		t.Fatal(err)
+	}
+	out := w.String()
+	if !strings.Contains(out, "backup.service failed 1x") || strings.Contains(out, "a.service") || !strings.Contains(out, "(3 service failures") {
+		t.Fatal(out)
 	}
 }
