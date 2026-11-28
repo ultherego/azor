@@ -19,7 +19,7 @@ type Record struct {
 	V        int                `json:"v"`
 	T        int64              `json:"t"`
 	Type     string             `json:"type"`
-	MemDef   int                `json:"mem,omitempty"` // 2: service RAM without file cache
+	MemDef   int                `json:"mem,omitempty"` // service RAM: 2 without file cache, 3 also without kernel file metadata
 	Avg      map[string]float64 `json:"avg,omitempty"`
 	Max      map[string]float64 `json:"max,omitempty"`
 	Min      map[string]float64 `json:"min,omitempty"`

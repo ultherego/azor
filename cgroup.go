@@ -30,15 +30,18 @@ func measure(dir string, seconds float64, prev, cur map[string]float64, disks ma
 	if !ok {
 		return
 	}
-	// Copies of files read or written by the group are counted there too, but
-	// the kernel drops them when memory is needed: they are kept apart.
+	// Copies of files read or written by the group, and the kernel's records
+	// of the files and folders it walked, are counted there too, but the kernel
+	// drops them when memory is needed: they are kept apart. A program that
+	// only walks the disk (an indexer, a snapshot tool) would otherwise look
+	// like it used gigabytes.
 	cache := 0.0
 	for _, l := range strings.Split(readStr(dir+"/memory.stat"), "\n") {
 		k, v, _ := strings.Cut(l, " ")
 		n, err := strconv.ParseFloat(v, 64)
 		switch {
 		case err != nil:
-		case k == "file":
+		case k == "file", k == "slab_reclaimable": // copies of files, and the kernel's notes on files and folders
 			cache += n
 		case k == "shmem":
 			cache -= n // shared memory is not dropped
@@ -141,7 +144,7 @@ func notable(all []proc, n int) (out []proc) {
 // extras describes what is not shown for every service.
 func (p proc) extras() (s string) {
 	if p.Cache >= 50 {
-		s += fmt.Sprintf("  +%.0f MB file cache", p.Cache)
+		s += fmt.Sprintf("  +%.0f MB cache", p.Cache)
 	}
 	if p.VRAM > 0 {
 		s += fmt.Sprintf("  VRAM %.0f MB", p.VRAM)

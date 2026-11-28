@@ -480,6 +480,9 @@ func (g gapTimes) describe(total, recorded float64) string {
 	return strings.Join(parts, ", ")
 }
 
+// memDef is the current way service RAM is measured (see Record.MemDef).
+const memDef = 3
+
 func cmdRange(w io.Writer, args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("usage: azor range FROM TO")
@@ -560,7 +563,7 @@ func cmdRange(w io.Writer, args []string) error {
 				// the disk peak is the highest total of one moment, not two maxima added
 				peaks[p.Name] = proc{CPU: max(k.CPU, p.CPU), VRAM: max(k.VRAM, p.VRAM), Read: max(k.Read, p.Read+p.Write), Cache: max(k.Cache, p.Cache),
 					StallCPU: max(k.StallCPU, p.StallCPU), StallMem: max(k.StallMem, p.StallMem), StallIO: max(k.StallIO, p.StallIO)}
-				if r.MemDef < 2 { // older records count file cache in, unlike newer ones
+				if r.MemDef < memDef { // older records count caches in, unlike newer ones
 					mixedMem = true
 					if newerMem {
 						continue
@@ -654,7 +657,7 @@ func cmdRange(w io.Writer, args []string) error {
 		fmt.Fprintln(w, "Largest processes (peak):", names(mem, " MB"))
 	}
 	if mixedMem && newerMem {
-		fmt.Fprintln(w, "Note: service RAM is counted without file cache since 2026-11-26; the changes below use only the newer records.")
+		fmt.Fprintln(w, "Note: service RAM is counted without caches since 2026-11-28 (without file cache since 2026-11-26); the changes below use only the newest records.")
 	}
 	for _, n := range sortedKeys(svcs) {
 		x := peaks[n].extras()

@@ -49,7 +49,7 @@ func takeSnapshot(t time.Time, reason string, st State, withServices bool) Recor
 	start := time.Now()
 	time.Sleep(time.Second)
 	secs := time.Since(start).Seconds()
-	r := Record{T: t.Unix(), Type: "snapshot", Key: reason, MemDef: 2, Avg: st.Values, New: strings.Join(st.Alerts, ", "), Desktop: st.Desktop}
+	r := Record{T: t.Unix(), Type: "snapshot", Key: reason, MemDef: 3, Avg: st.Values, New: strings.Join(st.Alerts, ", "), Desktop: st.Desktop}
 	r.CPU, r.Mem, _ = ps.top(secs, snapTop, nil)
 	if withServices {
 		r.Services = notable(svc.scan(userCgroup(), secs), snapTop)

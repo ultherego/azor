@@ -56,7 +56,7 @@ HH:MM means its latest past occurrence. Durations such as `24h` or `7d` count ba
 
 ### CPU, memory, GPU
 - Process and service CPU is relative to one thread: 100% = one full thread, so a busy game can show 300%.
-- Service RAM is the memory of the programs. File cache (copies of files read or written) is shown apart as "+N MB file cache" and is dropped by the kernel when memory is needed: a large cache is not a leak. Records before 2026-11-26 count both together, and `azor range` compares only records measured the same way.
+- Service RAM is the memory of the programs. Caches are shown apart as "+N MB cache": copies of files read or written, and the kernel's records of files and folders walked (an indexer or a snapshot tool can collect gigabytes of these). The kernel drops them when memory is needed: a large cache is not a leak. Records before 2026-11-26 count all of it as program memory, and those before 2026-11-28 count the file records; `azor range` compares only records measured the same way.
 - Summed RAM of same-named processes counts shared memory more than once.
 - VRAM per service comes from the kernel's device memory accounting, where the driver supports it.
 - "waits for CPU / memory / disk N%" (pressure stall) is the share of time a service was waiting for that resource; it explains stutter better than load alone.

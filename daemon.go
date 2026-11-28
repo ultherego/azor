@@ -428,7 +428,7 @@ func runDaemon() error {
 			st.Desktop = dt.scan(t.Sub(desktopAt).Seconds())
 			desktopAt = t
 			if len(st.Desktop) > 0 {
-				store(Record{T: t.Unix(), Type: "procs", MemDef: 2, Desktop: st.Desktop})
+				store(Record{T: t.Unix(), Type: "procs", MemDef: 3, Desktop: st.Desktop})
 			}
 		}
 		if cfg.on("services") {
@@ -547,7 +547,7 @@ func runDaemon() error {
 				if cfg.on("services") {
 					st.System = notable(sys.scan(systemCgroup, d.Seconds()), 3)
 				}
-				store(Record{T: now.Unix(), Type: "procs", MemDef: 2, CPU: st.CPU, Mem: st.Mem, Watch: st.Watch, Services: st.Services, System: st.System})
+				store(Record{T: now.Unix(), Type: "procs", MemDef: 3, CPU: st.CPU, Mem: st.Mem, Watch: st.Watch, Services: st.Services, System: st.System})
 			}
 			if cfg.on("disks") || cfg.on("filesystem") {
 				if fs := filesystems(readStr("/proc/self/mounts"), fsUsed); len(fs) > 0 {

@@ -1171,7 +1171,7 @@ func TestFileCacheIsApart(t *testing.T) {
 	if !ok || p.MB < 380 || p.MB > 382 || p.Cache < 8200 || p.Cache > 8202 {
 		t.Fatalf("%+v", p)
 	}
-	if !strings.Contains(p.extras(), "file cache") {
+	if !strings.Contains(p.extras(), "MB cache") {
 		t.Fatal(p.extras())
 	}
 }
@@ -1217,11 +1217,11 @@ func TestMixedMemoryRecords(t *testing.T) {
 	os.MkdirAll(dataDir(), 0o700)
 	end := time.Now().Add(-time.Hour).Truncate(time.Minute)
 	appendRecord(dataDir(), Record{T: end.Unix() - 120, Type: "procs", Services: []proc{{Name: "s", MB: 900}}})
-	appendRecord(dataDir(), Record{T: end.Unix() - 60, Type: "procs", MemDef: 2, Services: []proc{{Name: "s", MB: 100, Cache: 800}}})
-	appendRecord(dataDir(), Record{T: end.Unix(), Type: "procs", MemDef: 2, Services: []proc{{Name: "s", MB: 110, Cache: 790}}})
+	appendRecord(dataDir(), Record{T: end.Unix() - 60, Type: "procs", MemDef: memDef, Services: []proc{{Name: "s", MB: 100, Cache: 800}}})
+	appendRecord(dataDir(), Record{T: end.Unix(), Type: "procs", MemDef: memDef, Services: []proc{{Name: "s", MB: 110, Cache: 790}}})
 	var w strings.Builder
 	cmdRange(&w, []string{end.Add(-5 * time.Minute).Format("2006-01-02 15:04"), end.Format("2006-01-02 15:04")})
-	if !strings.Contains(w.String(), "RAM 100 -> 110 MB") || !strings.Contains(w.String(), "without file cache since") {
+	if !strings.Contains(w.String(), "RAM 100 -> 110 MB") || !strings.Contains(w.String(), "without caches since") {
 		t.Fatal(w.String())
 	}
 }
@@ -1335,5 +1335,15 @@ func TestTimerRunLine(t *testing.T) {
 	r.Old, r.New = "ok", "failed: exit-code"
 	if l := eventLine(r); !strings.Contains(l, "TIMER  snapper-cleanup failed: exit-code") {
 		t.Fatal(l)
+	}
+}
+
+func TestKernelFileRecordsAreCache(t *testing.T) {
+	r := t.TempDir()
+	// an indexer: no memory of its own, gigabytes of the kernel's notes on files
+	put(t, r, map[string]string{"u.service/memory.current": "4400000000", "u.service/memory.stat": "anon 2000000\nfile 100000000\nshmem 0\nslab_reclaimable 4290000000\nslab_unreclaimable 8000000\n"})
+	p, _ := measure(r+"/u.service", 0, nil, map[string]float64{}, nil)
+	if p.MB > 10 || p.Cache < 4100 {
+		t.Fatalf("%+v", p)
 	}
 }
