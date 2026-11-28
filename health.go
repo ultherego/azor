@@ -343,6 +343,9 @@ func bootSummary(text string) (string, bool) {
 		if ready <= 0 {
 			break
 		}
+		if seconds(total)-ready < 2 { // nothing ran on after the system was usable
+			return fmt.Sprintf("%.0fs until %s", ready, strings.TrimSpace(target)), true
+		}
 		return fmt.Sprintf("%.0fs until %s (all startup jobs: %s)", ready, strings.TrimSpace(target), total), true
 	}
 	return total, true

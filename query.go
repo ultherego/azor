@@ -331,7 +331,18 @@ func eventLine(r Record) string {
 	case "file":
 		return fmt.Sprintf("%s  file   %s changed", at, r.Key)
 	case "timer":
+		tag := "timer"
 		if strings.HasPrefix(r.New, "failed") {
+			tag = "TIMER"
+		}
+		if r.Old == r.New { // another run with the same result, kept for the statistics
+			took := ""
+			if r.Secs > 0 {
+				took = ", took " + fmtSecs(r.Secs)
+			}
+			return fmt.Sprintf("%s  %s  %s ran: %s%s", at, tag, r.Key, r.New, took)
+		}
+		if tag == "TIMER" {
 			return fmt.Sprintf("%s  TIMER  %s %s", at, r.Key, r.New)
 		}
 		return fmt.Sprintf("%s  timer  %s %s -> %s", at, r.Key, orNone(r.Old), orNone(r.New))

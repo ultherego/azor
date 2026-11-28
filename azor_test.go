@@ -1232,6 +1232,9 @@ func TestBootSummary(t *testing.T) {
 	if !ok || got != "41s until graphical.target (all startup jobs: 6min 18.975s)" {
 		t.Fatal(got)
 	}
+	if got, _ := bootSummary("Startup finished in 20s (firmware) + 9.794s (userspace) = 29.794s\ngraphical.target reached after 9.6s in userspace."); got != "30s until graphical.target" {
+		t.Fatal(got) // both nearly the same: one number, not "30s … (all: 29.794s)"
+	}
 	if got, _ := bootSummary("Startup finished in 1.2s (kernel) + 900ms (userspace) = 2.1s"); got != "2.1s" {
 		t.Fatal(got) // no target line: the total is all there is
 	}
@@ -1317,5 +1320,20 @@ func TestProblemsLeaveOutSessionEnds(t *testing.T) {
 	out := w.String()
 	if !strings.Contains(out, "backup.service failed 1x") || strings.Contains(out, "a.service") || !strings.Contains(out, "(3 service failures") {
 		t.Fatal(out)
+	}
+}
+
+func TestTimerRunLine(t *testing.T) {
+	r := Record{T: time.Now().Unix(), Type: "event", Kind: "timer", Key: "snapper-cleanup", Old: "ok", New: "ok", Secs: 3}
+	if l := eventLine(r); !strings.Contains(l, "snapper-cleanup ran: ok, took 3s") || strings.Contains(l, "->") {
+		t.Fatal(l)
+	}
+	r.Old, r.New = "failed: exit-code", "failed: exit-code"
+	if l := eventLine(r); !strings.Contains(l, "TIMER  snapper-cleanup ran: failed: exit-code") {
+		t.Fatal(l)
+	}
+	r.Old, r.New = "ok", "failed: exit-code"
+	if l := eventLine(r); !strings.Contains(l, "TIMER  snapper-cleanup failed: exit-code") {
+		t.Fatal(l)
 	}
 }
